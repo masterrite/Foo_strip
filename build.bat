@@ -39,6 +39,30 @@ if exist "%VSWHERE%" (
     )
 )
 
+REM --- Sanity check: we need a way to build. Either vcvarsall was found (so we
+REM     can set up the env ourselves), or msbuild is already on PATH (you ran
+REM     this from a Developer Command Prompt). If NEITHER, the build can only
+REM     produce broken output -- bail with instructions. This is the #1 mistake:
+REM     double-clicking the .bat, which has no compiler environment. ---
+where msbuild >nul 2>&1
+set "MSB_ON_PATH=%ERRORLEVEL%"
+if not defined VCVARSALL if not "%MSB_ON_PATH%"=="0" (
+    echo.
+    echo ============================================================
+    echo  ERROR: no Visual Studio build environment found.
+    echo.
+    echo  Don't double-click this file. Run it from a
+    echo  "Developer Command Prompt for VS 2022" instead:
+    echo.
+    echo    1. Start menu - "Developer Command Prompt for VS 2022"
+    echo    2. cd into this folder
+    echo    3. build.bat all
+    echo ============================================================
+    echo.
+    pause
+    exit /b 1
+)
+
 if /I "%MODE%"=="all" goto :build_all
 if /I "%MODE%"=="Win32" ( set ARCHES=Win32 & goto :build_list )
 if /I "%MODE%"=="x64"   ( set ARCHES=x64   & goto :build_list )
@@ -67,13 +91,17 @@ set "P=%~1"
 echo.
 echo === Building [%CONFIG% ^| %P%] ===
 
-REM Map MSBuild platform name to vcvarsall arch name.
-set "VCARCH=x86"
-if /I "%P%"=="x64" set "VCARCH=x64"
-
-REM Set up the matching compiler environment if we found vcvarsall.
-if defined VCVARSALL (
-    call "%VCVARSALL%" %VCARCH% >nul || ( echo ERROR: vcvarsall %VCARCH% failed & exit /b 1 )
+REM msbuild cross-targets both platforms via /p:Platform from a single Developer
+REM Command Prompt environment -- so if msbuild is already on PATH (you ran this
+REM from a Dev Prompt), DO NOT call vcvarsall. Re-running vcvarsall on top of an
+REM already-configured environment can corrupt it and produce broken (1KB) DLLs.
+REM Only set up the env via vcvarsall as a fallback when msbuild is NOT on PATH.
+if not "%MSB_ON_PATH%"=="0" (
+    if defined VCVARSALL (
+        set "VCARCH=x86"
+        if /I "%P%"=="x64" set "VCARCH=x64"
+        call "%VCVARSALL%" !VCARCH! >nul || ( echo ERROR: vcvarsall failed & exit /b 1 )
+    )
 )
 
 REM Clean this platform's artifacts (avoids PCH / arch mismatches).
@@ -85,7 +113,7 @@ msbuild lib\foobar_sdk\pfc\pfc.vcxproj /p:Configuration=%CONFIG% /p:Platform=%P%
 msbuild lib\foobar_sdk\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj /p:Configuration=%CONFIG% /p:Platform=%P% /p:PlatformToolset=%TOOLSET% || exit /b 1
 msbuild foo_strip.vcxproj /p:Configuration=%CONFIG% /p:Platform=%P% /p:PlatformToolset=%TOOLSET% || exit /b 1
 
-echo   -> bin\%P%\%CONFIG%\foo_strip.dll
+echo   -^> bin\%P%\%CONFIG%\foo_strip.dll
 exit /b 0
 
 REM ---------------------------------------------------------------------------
@@ -103,7 +131,12 @@ copy /y "%W32%" pkg\foo_strip.dll >nul
 copy /y "%X64%" pkg\foo_strip-x64.dll >nul
 
 if exist foo_strip.fb2k-component del /q foo_strip.fb2k-component
-powershell -NoProfile -Command "Compress-Archive -Path pkg\* -DestinationPath foo_strip.zip -Force; Rename-Item foo_strip.zip foo_strip.fb2k-component" || exit /b 1
+if exist foo_strip.zip del /q foo_strip.zip
+REM Compress-Archive only accepts a .zip destination, so zip to .zip then rename
+REM to .fb2k-component. An explicit file list keeps the DLLs at the archive root
+REM (a folder/wildcard can nest them under pkg\ and foobar rejects that).
+powershell -NoProfile -Command "Compress-Archive -Path 'pkg\foo_strip.dll','pkg\foo_strip-x64.dll' -DestinationPath 'foo_strip.zip' -Force" || exit /b 1
+ren foo_strip.zip foo_strip.fb2k-component
 rmdir /s /q pkg
-echo   -> foo_strip.fb2k-component  (install via Preferences ^> Components)
+echo   -^> foo_strip.fb2k-component  (install via Preferences ^> Components)
 exit /b 0
