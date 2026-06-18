@@ -22,6 +22,7 @@
 #include <gdiplus.h>
 #include <mutex>
 #include <string>
+#include <climits>
 
 #pragma comment(lib, "gdiplus.lib")
 
@@ -281,3 +282,27 @@ static cfg_bool g_cfg_dark_mode(
 
 void strip_save_dark_mode(bool dark) { g_cfg_dark_mode = dark; }
 bool strip_load_dark_mode() { return g_cfg_dark_mode; }
+
+// Window position persistence. INT_MIN sentinel = "never moved yet" so the very
+// first run falls back to the default corner. Separate GUIDs per value.
+static const int kPosUnset = INT_MIN;
+static cfg_int g_cfg_pos_x(
+    GUID{ 0x2c8e7d11, 0x6a4f, 0x4b2c,
+          { 0x83, 0x55, 0x1d, 0x9e, 0x44, 0x2a, 0x77, 0x10 } }, kPosUnset);
+static cfg_int g_cfg_pos_y(
+    GUID{ 0x2c8e7d12, 0x6a4f, 0x4b2c,
+          { 0x83, 0x55, 0x1d, 0x9e, 0x44, 0x2a, 0x77, 0x11 } }, kPosUnset);
+
+void strip_save_position(int x, int y) {
+    g_cfg_pos_x = x;
+    g_cfg_pos_y = y;
+}
+
+bool strip_load_position(int& x, int& y) {
+    int sx = (int)g_cfg_pos_x;
+    int sy = (int)g_cfg_pos_y;
+    if (sx == kPosUnset || sy == kPosUnset) return false; // never set
+    x = sx;
+    y = sy;
+    return true;
+}

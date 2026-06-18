@@ -25,6 +25,8 @@ StripState& strip_get_state();
 void strip_seek_to(double seconds);
 void strip_save_dark_mode(bool dark);   // persist theme choice to foobar cfg
 bool strip_load_dark_mode();            // read persisted theme choice (default true)
+void strip_save_position(int x, int y); // persist last-dragged window position
+bool strip_load_position(int& x, int& y); // read saved position; false if unset
 
 // Implemented in StripWindow.cpp:
 void strip_create_window();

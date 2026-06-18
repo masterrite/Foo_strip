@@ -739,7 +739,13 @@ static void CALLBACK MoveSizeEventProc(HWINEVENTHOOK, DWORD event, HWND,
     if (event == EVENT_SYSTEM_MOVESIZESTART) g_moveLoopActive = true;
     else if (event == EVENT_SYSTEM_MOVESIZEEND) {
         g_moveLoopActive = false;
-        if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE); // refresh once after
+        if (g_hwnd) {
+            InvalidateRect(g_hwnd, nullptr, FALSE); // refresh once after
+            // Persist the new position so the strip reopens where you left it.
+            RECT wr;
+            if (GetWindowRect(g_hwnd, &wr))
+                strip_save_position(wr.left, wr.top);
+        }
     }
 }
 
@@ -765,10 +771,28 @@ void strip_create_window() {
     DWORD exStyle = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
     DWORD style = WS_POPUP | WS_VISIBLE;
 
-    // Start bottom-right of the work area.
+    // Position: restore the last-dragged spot if we have one, else default to
+    // the bottom-right of the work area.
     RECT wa{}; SystemParametersInfo(SPI_GETWORKAREA, 0, &wa, 0);
-    int x = wa.right - kWidth - 16;
-    int y = wa.bottom - kHeight - 16;
+    int x, y;
+    if (strip_load_position(x, y)) {
+        // Clamp to the FULL virtual screen (all monitors), not the work area, so
+        // a position over the taskbar is preserved. The work area excludes the
+        // taskbar, so clamping to it would yank an on-taskbar strip upward. We
+        // still guard against fully off-screen (e.g. a detached monitor) by
+        // keeping the window within the overall desktop bounds.
+        int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if (x < vx) x = vx;
+        if (y < vy) y = vy;
+        if (x > vx + vw - kWidth) x = vx + vw - kWidth;
+        if (y > vy + vh - kHeight) y = vy + vh - kHeight;
+    } else {
+        x = wa.right - kWidth - 16;
+        y = wa.bottom - kHeight - 16;
+    }
 
     g_hwnd = CreateWindowEx(exStyle, kClassName, L"Foobar Strip", style,
                             x, y, kWidth, kHeight,
