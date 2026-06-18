@@ -65,17 +65,6 @@ Using the SDK from a different location instead of the vendored copy? Override:
 msbuild foo_strip.vcxproj /p:SdkRoot=C:\path\to\sdk\ /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
 ```
 
-## Continuous integration
-
-`.github/workflows/build.yml` builds on every push/PR and uploads the DLL as an
-artifact. Pushing a version tag (`vX.Y.Z`) also builds a `.fb2k-component` and
-attaches both to a GitHub Release.
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0   # triggers the release
-```
-
 ## Project layout
 
 ```
