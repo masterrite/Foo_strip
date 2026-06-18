@@ -4,22 +4,21 @@ A standalone, draggable, always-on-top **playback strip** for foobar2000 on
 Windows. Album art, scrolling title/artist, transport controls, and a working
 seek bar — floating over your desktop, independent of foobar's own window.
 
+<img width="300" height="54" alt="Snipaste_2026-06-17_19-50-11" src="https://github.com/user-attachments/assets/6e2e2ddc-e437-4969-849a-7844d262afaf" />
+
 Because it runs in-process, it reads position/length and seeks **directly**
-through foobar's `playback_control` (no SMTC, no bridge), which is why the seek
-bar actually works.
+through foobar's `playback_control` (no SMTC, no bridge).
 
 > Independent, unofficial component **for** foobar2000. Not affiliated with or
 > endorsed by the foobar2000 project. See [NOTICE.md](NOTICE.md).
 
 ## Features
 
-- Floating, draggable window (native OS drag — smooth).
+- Floating, draggable window.
 - Album art, title (continuous marquee when long), artist.
 - Previous / play-pause / next with hover + press feedback.
 - Seek bar with click/drag scrubbing, accurate time readout.
 - Hides automatically when a fullscreen game/video is in front.
-- Pauses its own repaints during window drags so it never makes foobar choppy.
-- ~60fps when animating, near-zero CPU when idle.
 
 ## Install
 
