@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!-- ============================================================
+       foo_strip component project (MSBuild / VS Build Tools).
+
+       ASSUMED LAYOUT (edit SdkRoot below if yours differs):
+
+         <SdkRoot>\
+           ├── foobar2000\        (SDK headers + libs)
+           ├── pfc\
+           └── foo_strip\         ← this project lives here
+               ├── foo_strip.vcxproj
+               ├── foo_strip.cpp
+               ├── StripWindow.cpp
+               ├── stdafx.cpp / stdafx.h
+
+       So the SDK root is one level up from this file: "..\"
+       ============================================================ -->
+
+  <PropertyGroup Label="UserPaths">
+    <!-- SDK is vendored inside the repo at lib\foobar_sdk\ so the build works
+         identically locally and in GitHub Actions. If you instead keep the SDK
+         elsewhere locally, override on the command line:
+           msbuild foo_strip.vcxproj /p:SdkRoot=C:\path\to\sdk\ -->
+    <SdkRoot Condition="'$(SdkRoot)'==''">$(MSBuildProjectDirectory)\lib\foobar_sdk\</SdkRoot>
+  </PropertyGroup>
+
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{8F2C1A77-4C3B-4E2A-9B11-0F4A6E7C1D20}</ProjectGuid>
+    <RootNamespace>foo_strip</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Condition="'$(Configuration)'=='Release'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <PlatformToolset>v143</PlatformToolset>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <CharacterSet>Unicode</CharacterSet>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)'=='Debug'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <PlatformToolset>v143</PlatformToolset>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <!-- Output: foo_strip.dll -->
+  <PropertyGroup>
+    <TargetName>foo_strip</TargetName>
+    <TargetExt>.dll</TargetExt>
+    <OutDir>$(MSBuildProjectDirectory)\bin\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildProjectDirectory)\obj\$(Configuration)\</IntDir>
+  </PropertyGroup>
+
+  <!-- Common include dirs: SDK root (so foobar2000\... and pfc\... resolve). -->
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(SdkRoot);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeaderFile>stdafx.h</PrecompiledHeaderFile>
+      <WarningLevel>Level3</WarningLevel>
+      <!-- SDK uses static CRT; component must match (/MT, /MTd). -->
+      <PreprocessorDefinitions>WIN32;_WINDOWS;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <!-- Actual SDK lib output folders (from `dir /s /b *.lib`). -->
+      <AdditionalLibraryDirectories>$(SdkRoot)foobar2000\SDK\Release;$(SdkRoot)pfc\Release;$(SdkRoot)foobar2000\shared;$(SdkRoot)foobar2000\foobar2000_component_client\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>foobar2000_SDK.lib;foobar2000_component_client.lib;pfc.lib;shared-Win32.lib;shlwapi.lib;gdiplus.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+    </ClCompile>
+    <Link>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
+  <!-- Source files. stdafx.cpp CREATES the PCH; the rest USE it. -->
+  <ItemGroup>
+    <ClCompile Include="stdafx.cpp">
+      <PrecompiledHeader>Create</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="foo_strip.cpp" />
+    <ClCompile Include="StripWindow.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="stdafx.h" />
+    <ClInclude Include="strip_shared.h" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

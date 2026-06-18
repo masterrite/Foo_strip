@@ -1,0 +1,36 @@
+# ---- Build outputs (yours) ----
+bin/
+obj/
+*.dll
+*.exp
+*.pdb
+*.ilk
+*.idb
+*.fb2k-component
+
+# ---- Build outputs that land INSIDE the vendored SDK after a local build ----
+# We vendor SDK *source* but not its build products. These globs catch the
+# Release/Debug output folders the SDK projects create when you build locally.
+lib/foobar_sdk/**/Release/
+lib/foobar_sdk/**/Debug/
+lib/foobar_sdk/**/*.lib
+lib/foobar_sdk/**/*.obj
+lib/foobar_sdk/**/*.pdb
+lib/foobar_sdk/**/*.pch
+lib/foobar_sdk/**/*.tlog
+lib/foobar_sdk/**/*.idb
+
+# NOTE: shared-*.lib ships PREBUILT in the SDK (foobar2000/shared/). Do NOT let
+# the *.lib rule above strip it — force-keep the shared libs:
+!lib/foobar_sdk/foobar2000/shared/*.lib
+
+# ---- VS / MSBuild noise ----
+.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+
+# ---- Misc ----
+*.log
+Thumbs.db

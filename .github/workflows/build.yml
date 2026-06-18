@@ -1,0 +1,65 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]          # version tags like v1.0.0 trigger a release
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:         # allow manual runs from the Actions tab
+
+permissions:
+  contents: write            # needed to create Releases on tags
+
+jobs:
+  build:
+    runs-on: windows-2022    # has VS 2022 Build Tools + MSBuild preinstalled
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      # ---- Build the vendored SDK static libs (Release|Win32) ----
+      # Paths assume the SDK is vendored under lib/foobar_sdk/ (see README).
+      # The /p:PlatformToolset=v143 override matches the windows-2022 runner.
+      - name: Build foobar2000_SDK
+        run: msbuild lib\foobar_sdk\foobar2000\SDK\foobar2000_SDK.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
+
+      - name: Build pfc
+        run: msbuild lib\foobar_sdk\pfc\pfc.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
+
+      - name: Build foobar2000_component_client
+        run: msbuild lib\foobar_sdk\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
+
+      # ---- Build the component ----
+      - name: Build foo_strip
+        run: msbuild foo_strip.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
+
+      # ---- Upload the DLL as a build artifact (every push / PR) ----
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: foo_strip-dll
+          path: bin\Release\foo_strip.dll
+          if-no-files-found: error
+
+      # ---- Package as an fb2k-component zip (handy for releases) ----
+      # foobar2000 components can be distributed as a .fb2k-component file, which
+      # is just a zip containing the DLL. Users can drag it into Components.
+      - name: Package .fb2k-component
+        if: startsWith(github.ref, 'refs/tags/')
+        run: Compress-Archive -Path bin\Release\foo_strip.dll -DestinationPath foo_strip.fb2k-component
+        shell: pwsh
+
+      # ---- On version tags, attach to a GitHub Release ----
+      - name: Create / update Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bin/Release/foo_strip.dll
+            foo_strip.fb2k-component
+          generate_release_notes: true

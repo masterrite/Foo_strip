@@ -1,0 +1,83 @@
+# foo_strip
+
+A standalone, draggable, always-on-top **playback strip** for foobar2000 on
+Windows. Album art, scrolling title/artist, transport controls, and a working
+seek bar — floating over your desktop, independent of foobar's own window.
+
+Because it runs in-process, it reads position/length and seeks **directly**
+through foobar's `playback_control` (no SMTC, no bridge), which is why the seek
+bar actually works.
+
+> Independent, unofficial component **for** foobar2000. Not affiliated with or
+> endorsed by the foobar2000 project. See [NOTICE.md](NOTICE.md).
+
+## Features
+
+- Floating, draggable window (native OS drag — smooth).
+- Album art, title (continuous marquee when long), artist.
+- Previous / play-pause / next with hover + press feedback.
+- Seek bar with click/drag scrubbing, accurate time readout.
+- Hides automatically when a fullscreen game/video is in front.
+- Pauses its own repaints during window drags so it never makes foobar choppy.
+- ~60fps when animating, near-zero CPU when idle.
+
+## Install
+
+Grab the latest `foo_strip.dll` (or `foo_strip.fb2k-component`) from
+[Releases](../../releases), then in foobar2000:
+
+- **Preferences -> Components -> Install...**, pick the file, and restart. Or drop
+  `foo_strip.dll` into
+  `%APPDATA%\foobar2000-v2\user-components\foo_strip\`.
+
+The strip appears bottom-right on startup. Drag it anywhere by an empty area.
+
+## Build from source
+
+Requirements: **Visual Studio 2022 Build Tools** (Desktop C++ workload), 32-bit.
+
+The foobar2000 SDK is vendored under `lib/foobar_sdk/`, so no separate download
+is needed. From a **Developer Command Prompt** (x86):
+
+```bat
+:: Build the SDK static libs (once)
+msbuild lib\foobar_sdk\foobar2000\SDK\foobar2000_SDK.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
+msbuild lib\foobar_sdk\pfc\pfc.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
+msbuild lib\foobar_sdk\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
+
+:: Build the component
+msbuild foo_strip.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
+```
+
+Output: `bin\Release\foo_strip.dll`.
+
+Using the SDK from a different location instead of the vendored copy? Override:
+```bat
+msbuild foo_strip.vcxproj /p:SdkRoot=C:\path\to\sdk\ /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
+```
+
+## Continuous integration
+
+`.github/workflows/build.yml` builds on every push/PR and uploads the DLL as an
+artifact. Pushing a version tag (`vX.Y.Z`) also builds a `.fb2k-component` and
+attaches both to a GitHub Release.
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0   # triggers the release
+```
+
+## Project layout
+
+```
+foo_strip.cpp        component plumbing: initquit + play_callback, direct seek
+StripWindow.cpp      GDI+ window: paint, drag, hit-testing, marquee, fullscreen
+strip_shared.h       shared StripState + cross-file declarations
+stdafx.h / .cpp      precompiled header (SDK + Windows includes)
+foo_strip.vcxproj    MSBuild project (Win32 DLL, /MD, PCH)
+lib/foobar_sdk/      vendored SDK (build inputs; see NOTICE.md)
+```
+
+## License
+
+Component source: [GPLv3](LICENSE). Vendored SDK: BSD-style (GPL-compatible) — see [NOTICE.md](NOTICE.md).

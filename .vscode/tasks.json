@@ -1,0 +1,18 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build foo_strip (Release|Win32)",
+      "type": "shell",
+      "command": "msbuild",
+      "args": [
+        "foo_strip.vcxproj",
+        "/p:Configuration=Release",
+        "/p:Platform=Win32"
+      ],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": "$msCompile",
+      "detail": "Run from a terminal that has executed vcvars32.bat (or launch VS Code from the Developer Command Prompt)."
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "configurations": [
+    {
+      "name": "foobar-sdk-win32",
+      "includePath": [
+        "${workspaceFolder}/**",
+        "${workspaceFolder}/..",
+        "${workspaceFolder}/../foobar2000/SDK",
+        "${workspaceFolder}/../pfc"
+      ],
+      "defines": ["WIN32", "_WINDOWS", "UNICODE", "_UNICODE"],
+      "cStandard": "c17",
+      "cppStandard": "c++17",
+      "intelliSenseMode": "windows-msvc-x86"
+    }
+  ],
+  "version": 4
+}
