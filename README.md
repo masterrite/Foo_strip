@@ -34,22 +34,31 @@ The strip appears bottom-right on startup. Drag it anywhere by an empty area.
 
 ## Build from source
 
-Requirements: **Visual Studio 2022 Build Tools** (Desktop C++ workload), 32-bit.
+Requirements: **Visual Studio 2022 Build Tools** (Desktop C++ workload).
+Targets both **32-bit** (`Win32`) and **64-bit** (`x64`) foobar2000.
 
 The foobar2000 SDK is vendored under `lib/foobar_sdk/`, so no separate download
-is needed. From a **Developer Command Prompt** (x86):
+is needed. From a **Developer Command Prompt**, pick your platform (`Win32` or
+`x64`) and build the SDK libs once for it, then the component:
 
 ```bat
-:: Build the SDK static libs (once)
+:: --- 32-bit (use the x86 Developer Command Prompt) ---
 msbuild lib\foobar_sdk\foobar2000\SDK\foobar2000_SDK.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
 msbuild lib\foobar_sdk\pfc\pfc.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
 msbuild lib\foobar_sdk\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
-
-:: Build the component
 msbuild foo_strip.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
+
+:: --- 64-bit (use the x64 Developer Command Prompt) ---
+msbuild lib\foobar_sdk\foobar2000\SDK\foobar2000_SDK.vcxproj /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143
+msbuild lib\foobar_sdk\pfc\pfc.vcxproj /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143
+msbuild lib\foobar_sdk\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143
+msbuild foo_strip.vcxproj /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143
 ```
 
-Output: `bin\Release\foo_strip.dll`.
+Output: `bin\Win32\Release\foo_strip.dll` and `bin\x64\Release\foo_strip.dll`.
+Install the one matching your foobar2000 architecture. `shared-Win32.lib` and
+`shared-x64.lib` both ship prebuilt in the SDK; the other three libs you build
+per-platform as shown.
 
 Using the SDK from a different location instead of the vendored copy? Override:
 ```bat

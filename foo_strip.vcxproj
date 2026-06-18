@@ -35,6 +35,14 @@
       <Configuration>Debug</Configuration>
       <Platform>Win32</Platform>
     </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
   </ItemGroup>
 
   <PropertyGroup Label="Globals">
@@ -50,7 +58,9 @@
     <PlatformToolset>v143</PlatformToolset>
     <UseDebugLibraries>false</UseDebugLibraries>
     <CharacterSet>Unicode</CharacterSet>
-    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <!-- WholeProgramOptimization (/GL + /LTCG) conflicts with /OPT:NOREF and can
+         itself strip foobar's service factories. Off for component safety. -->
+    <WholeProgramOptimization>false</WholeProgramOptimization>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)'=='Debug'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
@@ -65,8 +75,8 @@
   <PropertyGroup>
     <TargetName>foo_strip</TargetName>
     <TargetExt>.dll</TargetExt>
-    <OutDir>$(MSBuildProjectDirectory)\bin\$(Configuration)\</OutDir>
-    <IntDir>$(MSBuildProjectDirectory)\obj\$(Configuration)\</IntDir>
+    <OutDir>$(MSBuildProjectDirectory)\bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildProjectDirectory)\obj\$(Platform)\$(Configuration)\</IntDir>
   </PropertyGroup>
 
   <!-- Common include dirs: SDK root (so foobar2000\... and pfc\... resolve). -->
@@ -82,9 +92,28 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <!-- Actual SDK lib output folders (from `dir /s /b *.lib`). -->
-      <AdditionalLibraryDirectories>$(SdkRoot)foobar2000\SDK\Release;$(SdkRoot)pfc\Release;$(SdkRoot)foobar2000\shared;$(SdkRoot)foobar2000\foobar2000_component_client\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>foobar2000_SDK.lib;foobar2000_component_client.lib;pfc.lib;shared-Win32.lib;shlwapi.lib;gdiplus.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- System libs are common to both platforms; SDK lib dirs + the
+           platform-specific shared lib are set in the per-platform groups
+           below, because x64 builds output to an x64\ subfolder and use
+           shared-x64.lib instead of shared-Win32.lib. -->
+      <AdditionalDependencies>foobar2000_SDK.lib;foobar2000_component_client.lib;pfc.lib;shlwapi.lib;gdiplus.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <!-- Win32: SDK projects output libs to plain Release\ / Debug\ folders. -->
+  <ItemDefinitionGroup Condition="'$(Platform)'=='Win32'">
+    <Link>
+      <AdditionalLibraryDirectories>$(SdkRoot)foobar2000\SDK\$(Configuration);$(SdkRoot)pfc\$(Configuration);$(SdkRoot)foobar2000\shared;$(SdkRoot)foobar2000\foobar2000_component_client\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>shared-Win32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <!-- x64: MSBuild outputs to an x64\ subfolder, and the prebuilt shared lib is
+       shared-x64.lib. -->
+  <ItemDefinitionGroup Condition="'$(Platform)'=='x64'">
+    <Link>
+      <AdditionalLibraryDirectories>$(SdkRoot)foobar2000\SDK\x64\$(Configuration);$(SdkRoot)pfc\x64\$(Configuration);$(SdkRoot)foobar2000\shared;$(SdkRoot)foobar2000\foobar2000_component_client\x64\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>shared-x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 
@@ -96,8 +125,14 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
     </ClCompile>
     <Link>
-      <EnableCOMDATFolding>true</EnableCOMDATFolding>
-      <OptimizeReferences>true</OptimizeReferences>
+      <!-- CRITICAL for foobar components: /OPT:REF (OptimizeReferences) and
+           /OPT:ICF (COMDATFolding) strip or merge the static service-factory
+           globals that foobar discovers at load time. On x64 Release this
+           produced a DLL with no registered services -> "component has been
+           damaged". Disabling both keeps the factories intact. The size cost is
+           negligible for a component this small. -->
+      <EnableCOMDATFolding>false</EnableCOMDATFolding>
+      <OptimizeReferences>false</OptimizeReferences>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">

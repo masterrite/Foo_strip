@@ -23,6 +23,8 @@ struct StripState {
 // Implemented in foo_strip.cpp:
 StripState& strip_get_state();
 void strip_seek_to(double seconds);
+void strip_save_dark_mode(bool dark);   // persist theme choice to foobar cfg
+bool strip_load_dark_mode();            // read persisted theme choice (default true)
 
 // Implemented in StripWindow.cpp:
 void strip_create_window();

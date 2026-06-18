@@ -20,11 +20,11 @@ using namespace Gdiplus;
 namespace {
 
 const int kWidth      = 300;
-const int kHeight     = 54;   // (3) shorter
-const int kPad        = 7;
-const int kArt        = 28;   // album art square (top row)
+const int kHeight     = 46;   // strip height
+const int kPad        = 6;
+const int kArt        = 26;   // album art square (top row)
 const int kBtn        = 26;   // transport button hit size
-const int kSeekH      = 14;   // seek row height
+const int kSeekH      = 12;   // seek row height
 const wchar_t* kClassName = L"FoobarStripWindow";
 
 ULONG_PTR g_gdiplusToken = 0;
@@ -50,6 +50,67 @@ int g_pressed_btn = 0;
 // hover feedback: which button the mouse is currently over (same numbering).
 int g_hover_btn = 0;
 bool g_tracking_leave = false; // TrackMouseEvent armed for WM_MOUSELEAVE
+
+// Album-art enlarge popup: a separate borderless top-level window that shows a
+// 300x300 version of the cover while the mouse is over the art thumbnail.
+HWND g_artPopup = nullptr;
+bool g_artHover = false;             // mouse currently over the art region
+RECT g_rcArt{};                      // art thumbnail rect (set each paint)
+const int kPopupSize = 300;          // enlarged art dimension
+const wchar_t* kPopupClass = L"FoobarStripArtPopup";
+
+// Forward declarations (defined after StripProc).
+void show_art_popup();
+void hide_art_popup();
+
+// ----------------------------------------------------------------------------
+// Theming. All paint colors route through the active Theme so right-click can
+// flip dark/light. ARGB values.
+// ----------------------------------------------------------------------------
+struct Theme {
+    Gdiplus::Color bg;          // strip background
+    Gdiplus::Color artPh;       // album-art placeholder
+    Gdiplus::Color title;       // title text
+    Gdiplus::Color artist;      // artist + time text
+    Gdiplus::Color icon;        // transport glyphs
+    Gdiplus::Color groove;      // seek track (unfilled)
+    Gdiplus::Color accent;      // seek fill
+    Gdiplus::Color thumb;       // seek thumb
+    Gdiplus::Color btnHl;       // button hover/press tint (alpha applied per-use)
+    Gdiplus::Color popupBg;     // enlarge popup backdrop
+    Gdiplus::Color popupBorder; // enlarge popup border
+};
+
+const Theme kDarkTheme = {
+    Gdiplus::Color(230, 24, 26, 31),   // bg (slightly translucent dark)
+    Gdiplus::Color(255, 40, 44, 52),   // artPh
+    Gdiplus::Color(255, 242, 244, 248),// title
+    Gdiplus::Color(255, 138, 147, 162),// artist
+    Gdiplus::Color(255, 212, 218, 227),// icon
+    Gdiplus::Color(255, 60, 64, 72),   // groove
+    Gdiplus::Color(255, 91, 167, 245), // accent
+    Gdiplus::Color(255, 255, 255, 255),// thumb
+    Gdiplus::Color(255, 255, 255, 255),// btnHl (white tint)
+    Gdiplus::Color(255, 18, 20, 24),   // popupBg
+    Gdiplus::Color(255, 70, 76, 86),   // popupBorder
+};
+
+const Theme kLightTheme = {
+    Gdiplus::Color(255, 238, 238, 238),// bg (matches Win11 taskbar)
+    Gdiplus::Color(255, 210, 214, 220),// artPh
+    Gdiplus::Color(255, 28, 32, 38),   // title (dark text)
+    Gdiplus::Color(255, 96, 104, 116), // artist
+    Gdiplus::Color(255, 64, 70, 80),   // icon (dark glyphs)
+    Gdiplus::Color(255, 198, 202, 208),// groove
+    Gdiplus::Color(255, 38, 130, 222), // accent (slightly deeper blue for contrast)
+    Gdiplus::Color(255, 60, 66, 76),   // thumb (dark on light)
+    Gdiplus::Color(255, 0, 0, 0),      // btnHl (black tint on light bg)
+    Gdiplus::Color(255, 248, 249, 251),// popupBg
+    Gdiplus::Color(255, 200, 205, 212),// popupBorder
+};
+
+bool g_darkMode = true;                 // toggled by right-click; persisted
+const Theme& theme() { return g_darkMode ? kDarkTheme : kLightTheme; }
 
 // (2) after releasing a scrub, hold the target position until foobar's reported
 // position catches up, so the thumb doesn't flash back to the old spot.
@@ -130,12 +191,16 @@ void paint(HWND hwnd) {
     HBITMAP old = (HBITMAP)SelectObject(mem, bmp);
 
     Graphics g(mem);
-    g.SetSmoothingMode(SmoothingModeAntiAlias);
     g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
 
-    // Background (graphite, slight translucency look via solid dark).
-    SolidBrush bg(Color(230, 24, 26, 31));
-    g.FillRectangle(&bg, 0, 0, W, H);
+    // Background: fill with smoothing OFF and as a fully opaque base so the
+    // black double-buffer doesn't bleed through at the edges (which showed as a
+    // dark line on the top/left). Antialiasing is enabled afterward for glyphs.
+    g.SetSmoothingMode(SmoothingModeNone);
+    Color base = theme().bg;
+    SolidBrush bg(Color(255, base.GetR(), base.GetG(), base.GetB()));
+    g.FillRectangle(&bg, -1, -1, W + 2, H + 2);
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
 
     // Snapshot state under lock.
     std::wstring title, artist, timeStr;
@@ -154,12 +219,21 @@ void paint(HWND hwnd) {
         if (st.length > 0) frac = min(1.0, max(0.0, pos / st.length));
         timeStr = fmt_time(pos) + L" / " + fmt_time(st.length);
 
-        // ---- Top row: album art ----
-        int ax = kPad, ay = kPad;
+        // Vertical layout: the seek row occupies the bottom; the top row (art,
+        // title, buttons) is centered in the remaining area above it. This keeps
+        // everything balanced at 46px without overlap or dead space.
+        int seekTop = H - kPad - kSeekH;          // top of the seek row
+        int topArea = seekTop;                    // top content area height (0..seekTop)
+
+        // ---- Top row: album art (vertically centered in the top area) ----
+        int ax = kPad;
+        int ay = (topArea - kArt) / 2;
+        if (ay < 2) ay = 2;
+        g_rcArt = { ax, ay, ax + kArt, ay + kArt }; // for hover hit-testing
         if (art) {
             g.DrawImage(art, ax, ay, kArt, kArt);
         } else {
-            SolidBrush ph(Color(255, 40, 44, 52));
+            SolidBrush ph(theme().artPh);
             g.FillRectangle(&ph, ax, ay, kArt, kArt);
         }
 
@@ -167,8 +241,8 @@ void paint(HWND hwnd) {
         FontFamily ff(L"Segoe UI");
         Font fTitle(&ff, 11, FontStyleBold, UnitPixel);
         Font fArtist(&ff, 9, FontStyleRegular, UnitPixel);
-        SolidBrush cTitle(Color(255, 242, 244, 248));
-        SolidBrush cArtist(Color(255, 138, 147, 162));
+        SolidBrush cTitle(theme().title);
+        SolidBrush cArtist(theme().artist);
 
         int tx = ax + kArt + kPad;
         int textW = W - tx - (kBtn * 3) - kPad * 2;
@@ -219,13 +293,13 @@ void paint(HWND hwnd) {
 
         g.DrawString(artist.c_str(), -1, &fArtist, artistRect, &sf, &cArtist);
 
-        // ---- Transport buttons (right of top row) ----
-        int by = kPad + (kArt - kBtn) / 2;
+        // ---- Transport buttons (right of top row, centered to the art) ----
+        int by = ay + (kArt - kBtn) / 2;
         g_rcNext = { W - kPad - kBtn, by, W - kPad, by + kBtn };
         g_rcPlay = { g_rcNext.left - kBtn, by, g_rcNext.left, by + kBtn };
         g_rcPrev = { g_rcPlay.left - kBtn, by, g_rcPlay.left, by + kBtn };
 
-        SolidBrush ico(Color(255, 212, 218, 227));
+        SolidBrush ico(theme().icon);
 
         // (1) Button feedback: hover = subtle, pressed = stronger.
         {
@@ -234,7 +308,8 @@ void paint(HWND hwnd) {
                 if (g_pressed_btn == id) alpha = 70;
                 else if (g_hover_btn == id) alpha = 32;
                 if (alpha == 0) return;
-                SolidBrush hl(Color(alpha, 255, 255, 255));
+                Color t = theme().btnHl;
+                SolidBrush hl(Color(alpha, t.GetR(), t.GetG(), t.GetB()));
                 g.FillRectangle(&hl, r.left + 2, r.top + 2,
                                 (r.right - r.left) - 4, (r.bottom - r.top) - 4);
             };
@@ -285,19 +360,19 @@ void paint(HWND hwnd) {
         g_rcSeek = { seekLeft, H - kPad - kSeekH, seekRight, H - kPad };
 
         int trackY = (g_rcSeek.top + g_rcSeek.bottom) / 2;
-        SolidBrush groove(Color(255, 60, 64, 72));
-        SolidBrush accent(Color(255, 91, 167, 245));
+        SolidBrush groove(theme().groove);
+        SolidBrush accent(theme().accent);
         g.FillRectangle(&groove, seekLeft, trackY - 1, seekRight - seekLeft, 3);
         int fillW = (int)((seekRight - seekLeft) * frac);
         g.FillRectangle(&accent, seekLeft, trackY - 1, fillW, 3);
 
         // thumb
-        SolidBrush thumb(Color(255, 255, 255, 255));
+        SolidBrush thumb(theme().thumb);
         int thumbX = seekLeft + fillW;
         g.FillEllipse(&thumb, thumbX - 5, trackY - 5, 10, 10);
 
         // time text
-        SolidBrush cTime(Color(255, 138, 147, 162));
+        SolidBrush cTime(theme().artist);
         RectF timeRect((REAL)(seekRight + kPad), (REAL)(g_rcSeek.top - 1), (REAL)(timeW + kPad), (REAL)kSeekH);
         g.DrawString(t.c_str(), -1, &fTime, timeRect, &sf, &cTime);
     }
@@ -332,6 +407,15 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             } else if (!fs && g_hiddenForFullscreen) {
                 g_hiddenForFullscreen = false;
                 ShowWindow(hwnd, SW_SHOWNA); // show without activating
+            }
+
+            // Re-assert topmost z-order. A one-time WS_EX_TOPMOST at creation
+            // isn't enough to stay above the taskbar (itself topmost) or other
+            // topmost windows that leapfrog us. Nudging back to HWND_TOPMOST
+            // ~1/sec keeps the strip visible without moving/activating it.
+            if (!g_hiddenForFullscreen) {
+                SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             }
         }
         if (g_hiddenForFullscreen) return 0; // nothing to draw while hidden
@@ -461,6 +545,16 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_hover_btn = h;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
+
+            // Album-art hover → show/hide the enlarged popup.
+            bool overArt = pt_in(g_rcArt, x, y);
+            if (overArt && !g_artHover) {
+                g_artHover = true;
+                show_art_popup();
+            } else if (!overArt && g_artHover) {
+                g_artHover = false;
+                hide_art_popup();
+            }
         }
 
         if (g_scrubbing) {
@@ -515,10 +609,19 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_hover_btn = 0;
             InvalidateRect(hwnd, nullptr, FALSE);
         }
+        if (g_artHover) {
+            g_artHover = false;
+            hide_art_popup();
+        }
         return 0;
 
     case WM_RBUTTONUP:
-        // Right-click closes nothing; reserved (could add a context menu later).
+        // Toggle light/dark. Repaint strip + popup, and persist the choice.
+        g_darkMode = !g_darkMode;
+        InvalidateRect(hwnd, nullptr, FALSE);
+        if (g_artPopup && IsWindowVisible(g_artPopup))
+            InvalidateRect(g_artPopup, nullptr, FALSE);
+        strip_save_dark_mode(g_darkMode); // persist via foobar cfg
         return 0;
 
     case WM_ERASEBKGND:
@@ -533,6 +636,96 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     return DefWindowProc(hwnd, msg, wp, lp);
+}
+
+// ----------------------------------------------------------------------------
+// Album-art enlarge popup
+// ----------------------------------------------------------------------------
+LRESULT CALLBACK ArtPopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc; GetClientRect(hwnd, &rc);
+        int W = rc.right, H = rc.bottom;
+
+        HDC mem = CreateCompatibleDC(hdc);
+        HBITMAP bmp = CreateCompatibleBitmap(hdc, W, H);
+        HBITMAP old = (HBITMAP)SelectObject(mem, bmp);
+
+        Graphics g(mem);
+        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+
+        // Backdrop + thin border so it reads as a panel over any wallpaper.
+        SolidBrush bg(theme().popupBg);
+        g.FillRectangle(&bg, 0, 0, W, H);
+
+        {
+            auto& st = strip_get_state();
+            std::lock_guard<std::mutex> guard(st.lock);
+            if (st.art) {
+                g.DrawImage(st.art, 4, 4, W - 8, H - 8); // scaled up, small inset
+            } else {
+                SolidBrush ph(theme().artPh);
+                g.FillRectangle(&ph, 4, 4, W - 8, H - 8);
+            }
+        }
+        Pen border(theme().popupBorder, 1.0f);
+        g.DrawRectangle(&border, 0, 0, W - 1, H - 1);
+
+        BitBlt(hdc, 0, 0, W, H, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, old);
+        DeleteObject(bmp);
+        DeleteDC(mem);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    if (msg == WM_ERASEBKGND) return 1;
+    return DefWindowProc(hwnd, msg, wp, lp);
+}
+
+void ensure_art_popup_created() {
+    if (g_artPopup) return;
+    HINSTANCE hInst = core_api::get_my_instance();
+    WNDCLASSEX wc = { sizeof(wc) };
+    wc.lpfnWndProc = ArtPopupProc;
+    wc.hInstance = hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.lpszClassName = kPopupClass;
+    RegisterClassEx(&wc);
+
+    g_artPopup = CreateWindowEx(
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+        kPopupClass, L"", WS_POPUP,
+        0, 0, kPopupSize, kPopupSize,
+        nullptr, nullptr, hInst, nullptr);
+}
+
+void show_art_popup() {
+    ensure_art_popup_created();
+    if (!g_artPopup || !g_hwnd) return;
+
+    // Center the enlarged cover horizontally over the strip so their edges
+    // line up cleanly (strip and popup are the same width).
+    RECT sr; GetWindowRect(g_hwnd, &sr);
+    int stripW = sr.right - sr.left;
+    int x = sr.left + (stripW - kPopupSize) / 2;
+    int yAbove = sr.top - kPopupSize - 6;
+    int yBelow = sr.bottom + 6;
+
+    // Clamp only if it would actually leave the screen work area.
+    RECT wa{}; SystemParametersInfo(SPI_GETWORKAREA, 0, &wa, 0);
+    if (x + kPopupSize > wa.right) x = wa.right - kPopupSize;
+    if (x < wa.left) x = wa.left;
+
+    int y = (yAbove >= wa.top) ? yAbove : yBelow; // prefer above, else below
+
+    SetWindowPos(g_artPopup, HWND_TOPMOST, x, y, kPopupSize, kPopupSize,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    InvalidateRect(g_artPopup, nullptr, FALSE);
+}
+
+void hide_art_popup() {
+    if (g_artPopup) ShowWindow(g_artPopup, SW_HIDE);
 }
 
 } // namespace
@@ -554,6 +747,8 @@ static void CALLBACK MoveSizeEventProc(HWINEVENTHOOK, DWORD event, HWND,
 // Public entry points called from foo_strip.cpp
 // ----------------------------------------------------------------------------
 void strip_create_window() {
+    g_darkMode = strip_load_dark_mode(); // restore persisted theme
+
     GdiplusStartupInput gdiIn;
     GdiplusStartup(&g_gdiplusToken, &gdiIn, nullptr);
 
@@ -598,6 +793,11 @@ void strip_destroy_window() {
         UnhookWinEvent(g_moveHook);
         g_moveHook = nullptr;
     }
+    if (g_artPopup) {
+        DestroyWindow(g_artPopup);
+        g_artPopup = nullptr;
+        UnregisterClass(kPopupClass, core_api::get_my_instance());
+    }
     if (g_hwnd) {
         DestroyWindow(g_hwnd);
         g_hwnd = nullptr;
@@ -611,6 +811,8 @@ void strip_destroy_window() {
 
 void strip_notify_repaint() {
     if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
+    if (g_artPopup && IsWindowVisible(g_artPopup))
+        InvalidateRect(g_artPopup, nullptr, FALSE); // refresh enlarged cover too
 }
 
 void strip_reset_interp() {
