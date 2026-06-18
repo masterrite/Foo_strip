@@ -261,3 +261,16 @@ void strip_seek_to(double seconds) {
         pc->playback_seek(seconds);
     }
 }
+
+// ----------------------------------------------------------------------------
+// Theme persistence via foobar's config system. cfg_bool saves to foobar's
+// configuration automatically and restores on startup. The GUID is a unique
+// identifier for this setting — generate your own if you fork this.
+// ----------------------------------------------------------------------------
+static cfg_bool g_cfg_dark_mode(
+    GUID{ 0x9a3f1c20, 0x4b7e, 0x4e8a,
+          { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x44 } },
+    true /* default: dark */);
+
+void strip_save_dark_mode(bool dark) { g_cfg_dark_mode = dark; }
+bool strip_load_dark_mode() { return g_cfg_dark_mode; }

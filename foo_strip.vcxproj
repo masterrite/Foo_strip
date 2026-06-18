@@ -19,11 +19,9 @@
        ============================================================ -->
 
   <PropertyGroup Label="UserPaths">
-    <!-- SDK is vendored inside the repo at lib\foobar_sdk\ so the build works
-         identically locally and in GitHub Actions. If you instead keep the SDK
-         elsewhere locally, override on the command line:
-           msbuild foo_strip.vcxproj /p:SdkRoot=C:\path\to\sdk\ -->
-    <SdkRoot Condition="'$(SdkRoot)'==''">$(MSBuildProjectDirectory)\lib\foobar_sdk\</SdkRoot>
+    <!-- If your foo_strip folder is NOT inside the SDK root, change this to the
+         absolute path of the SDK root, e.g. C:\dev\fb2k_sdk\ (keep trailing \). -->
+    <SdkRoot>$(MSBuildProjectDirectory)\..\</SdkRoot>
   </PropertyGroup>
 
   <ItemGroup Label="ProjectConfigurations">
@@ -34,14 +32,6 @@
     <ProjectConfiguration Include="Debug|Win32">
       <Configuration>Debug</Configuration>
       <Platform>Win32</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Release|x64">
-      <Configuration>Release</Configuration>
-      <Platform>x64</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Debug|x64">
-      <Configuration>Debug</Configuration>
-      <Platform>x64</Platform>
     </ProjectConfiguration>
   </ItemGroup>
 
@@ -73,8 +63,8 @@
   <PropertyGroup>
     <TargetName>foo_strip</TargetName>
     <TargetExt>.dll</TargetExt>
-    <OutDir>$(MSBuildProjectDirectory)\bin\$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(MSBuildProjectDirectory)\obj\$(Platform)\$(Configuration)\</IntDir>
+    <OutDir>$(MSBuildProjectDirectory)\bin\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildProjectDirectory)\obj\$(Configuration)\</IntDir>
   </PropertyGroup>
 
   <!-- Common include dirs: SDK root (so foobar2000\... and pfc\... resolve). -->
@@ -90,28 +80,9 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <!-- System libs are common to both platforms; SDK lib dirs + the
-           platform-specific shared lib are set in the per-platform groups
-           below, because x64 builds output to an x64\ subfolder and use
-           shared-x64.lib instead of shared-Win32.lib. -->
-      <AdditionalDependencies>foobar2000_SDK.lib;foobar2000_component_client.lib;pfc.lib;shlwapi.lib;gdiplus.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
-    </Link>
-  </ItemDefinitionGroup>
-
-  <!-- Win32: SDK projects output libs to plain Release\ / Debug\ folders. -->
-  <ItemDefinitionGroup Condition="'$(Platform)'=='Win32'">
-    <Link>
-      <AdditionalLibraryDirectories>$(SdkRoot)foobar2000\SDK\$(Configuration);$(SdkRoot)pfc\$(Configuration);$(SdkRoot)foobar2000\shared;$(SdkRoot)foobar2000\foobar2000_component_client\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>shared-Win32.lib;%(AdditionalDependencies)</AdditionalDependencies>
-    </Link>
-  </ItemDefinitionGroup>
-
-  <!-- x64: MSBuild outputs to an x64\ subfolder, and the prebuilt shared lib is
-       shared-x64.lib. -->
-  <ItemDefinitionGroup Condition="'$(Platform)'=='x64'">
-    <Link>
-      <AdditionalLibraryDirectories>$(SdkRoot)foobar2000\SDK\x64\$(Configuration);$(SdkRoot)pfc\x64\$(Configuration);$(SdkRoot)foobar2000\shared;$(SdkRoot)foobar2000\foobar2000_component_client\x64\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>shared-x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- Actual SDK lib output folders (from `dir /s /b *.lib`). -->
+      <AdditionalLibraryDirectories>$(SdkRoot)foobar2000\SDK\Release;$(SdkRoot)pfc\Release;$(SdkRoot)foobar2000\shared;$(SdkRoot)foobar2000\foobar2000_component_client\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>foobar2000_SDK.lib;foobar2000_component_client.lib;pfc.lib;shared-Win32.lib;shlwapi.lib;gdiplus.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 
