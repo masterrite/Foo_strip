@@ -1,25 +1,30 @@
 # foo_strip
 
+<p align="center">
+<img width="300" height="352" alt="image" src="https://github.com/user-attachments/assets/84127c8e-566b-4d8f-9a6f-ac19a067a89f" />
+<img width="300" height="352" alt="image" src="https://github.com/user-attachments/assets/a4e22952-a722-4bb3-9c9e-dd47abdb5d5a" />
+</p>
+
 A standalone, draggable, always-on-top **playback strip** for foobar2000 on
-Windows. Album art, scrolling title/artist, transport controls, and a working
-seek bar — floating over your desktop, independent of foobar's own window.
+Windows, inspired by Deskband Controls. Album art, scrolling title/artist, transport controls, and a working
+seek bar — floating over your desktop, independent of foobar's own window. Reads position/length and seeks **directly**
+through foobar's `playback_control` (no SMTC, no bridge).
 
-Because it runs in-process, it reads position/length and seeks **directly**
-through foobar's `playback_control` (no SMTC, no bridge), which is why the seek
-bar actually works.
+This is a personal project to solve the problem that Windows 11 doesn't allow taskbar plugins anymore, which means Deskband Controls is no longer available. This project is build using Claude, Opus 4.8, for personal use.
 
-> Independent, unofficial component **for** foobar2000. Not affiliated with or
+> Independent, unofficial component for foobar2000. Not affiliated with or
 > endorsed by the foobar2000 project. See [NOTICE.md](NOTICE.md).
 
 ## Features
 
-- Floating, draggable window (native OS drag — smooth).
-- Album art, title (continuous marquee when long), artist.
-- Previous / play-pause / next with hover + press feedback.
-- Seek bar with click/drag scrubbing, accurate time readout.
-- Hides automatically when a fullscreen game/video is in front.
-- Pauses its own repaints during window drags so it never makes foobar choppy.
-- ~60fps when animating, near-zero CPU when idle.
+- Floating, draggable window
+- Album art, title (continuous marquee when long), artist
+  - Album art pop-up on hover, and its position depends on where the strip is (pops up below the strip if there are no space on top)
+- Previous / play-pause / next with hover + press feedback
+- Seek bar with click/drag scrubbing, accurate time readout
+- Hides automatically when a fullscreen game/video is in front
+- Right-click anywhere in the strip to toggle between light and dark mode
+  - Carries over on restart
 
 ## Install
 
@@ -65,17 +70,6 @@ Using the SDK from a different location instead of the vendored copy? Override:
 msbuild foo_strip.vcxproj /p:SdkRoot=C:\path\to\sdk\ /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
 ```
 
-## Continuous integration
-
-`.github/workflows/build.yml` builds on every push/PR and uploads the DLL as an
-artifact. Pushing a version tag (`vX.Y.Z`) also builds a `.fb2k-component` and
-attaches both to a GitHub Release.
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0   # triggers the release
-```
-
 ## Project layout
 
 ```
@@ -90,3 +84,7 @@ lib/foobar_sdk/      vendored SDK (build inputs; see NOTICE.md)
 ## License
 
 Component source: [GPLv3](LICENSE). Vendored SDK: BSD-style (GPL-compatible) — see [NOTICE.md](NOTICE.md).
+
+## Acknoledgement
+
+I'd like to thank [@Eldarien](https://github.com/Eldarien) for his Deskband Controls. Please check out his [source code](https://github.com/Eldarien/DeskbandControls)
