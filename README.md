@@ -53,7 +53,7 @@ is needed.
 Open the Developer Command Prompt for Visual Studio 2022:
 
 ```
-Build.bat all
+build.bat all
 ```
 
 The script cleans stale artifacts, builds the three SDK libs, then the
