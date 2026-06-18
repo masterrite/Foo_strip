@@ -49,19 +49,9 @@ is needed.
 
 ### Easiest: build.bat
 
-Open the **Developer Command Prompt that matches your target** (x86 prompt for
-Win32, x64 prompt for x64), then from the repo root:
-
-```bat
-build.bat Win32      :: 32-bit
-build.bat x64        :: 64-bit
-```
-
-The script cleans stale artifacts, builds the three SDK libs, then the
-component. Output: `bin\<Platform>\Release\foo_strip.dll`.
-
-For a 64-bit install, rename that output to `foo_strip-x64.dll` (see Install).
-
+Just run the Build.bat file. The script cleans stale artifacts, builds the three SDK libs, then the
+component. Output: `bin\<Platform>\Release\foo_strip.dll`, and a bundled foo_strip.fb2k-component in the root folder (where the bat file is) for easy install.
+ 
 ### Manual
 
 If you'd rather run the steps yourself (same as the script), for each platform
