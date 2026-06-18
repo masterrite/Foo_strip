@@ -18,6 +18,7 @@ This is a personal project to solve the problem that Windows 11 doesn't allow ta
 ## Features
 
 - Floating, draggable window
+  - Remembers its previous position upon restart
 - Album art, title (continuous marquee when long), artist
   - Album art pop-up on hover, and its position depends on where the strip is (pops up below the strip if there are no space on top)
 - Previous / play-pause / next with hover + press feedback
@@ -49,7 +50,13 @@ is needed.
 
 ### Easiest: build.bat
 
-Just run the Build.bat file. The script cleans stale artifacts, builds the three SDK libs, then the
+Open the Developer Command Prompt for Visual Studio 2022:
+
+```
+Build.bat all
+```
+
+The script cleans stale artifacts, builds the three SDK libs, then the
 component. Output: `bin\<Platform>\Release\foo_strip.dll`, and a bundled foo_strip.fb2k-component in the root folder (where the bat file is) for easy install.
  
 ### Manual
