@@ -28,47 +28,55 @@ This is a personal project to solve the problem that Windows 11 doesn't allow ta
 
 ## Install
 
-Grab the latest `foo_strip.dll` (or `foo_strip.fb2k-component`) from
-[Releases](../../releases), then in foobar2000:
+Download the build that matches your foobar2000 from [Releases](../../releases):
 
-- **Preferences -> Components -> Install...**, pick the file, and restart. Or drop
-  `foo_strip.dll` into
-  `%APPDATA%\foobar2000-v2\user-components\foo_strip\`.
+- **32-bit foobar2000** -> `foo_strip.dll`
+  Place in `%APPDATA%\foobar2000-v2\user-components\foo_strip\foo_strip.dll`
+- **64-bit foobar2000** -> `foo_strip-x64.dll`
+  Place in `%APPDATA%\foobar2000-v2\user-components-x64\foo_strip-x64\foo_strip-x64.dll`
 
-The strip appears bottom-right on startup. Drag it anywhere by an empty area.
+Or download the foo_strip.fb2k-component file and install through Preferences -> Components -> Install
 
 ## Build from source
 
-Requirements: **Visual Studio 2022 Build Tools** (Desktop C++ workload).
-Targets both **32-bit** (`Win32`) and **64-bit** (`x64`) foobar2000.
+Requirements: **Visual Studio 2022 Build Tools** with the **Desktop development
+with C++** workload (provides MSBuild + the v143 toolset). Targets both 32-bit
+(`Win32`) and 64-bit (`x64`).
 
-The foobar2000 SDK is vendored under `lib/foobar_sdk/`, so no separate download
-is needed. From a **Developer Command Prompt**, pick your platform (`Win32` or
-`x64`) and build the SDK libs once for it, then the component:
+The foobar2000 SDK is vendored under `lib/foobar_sdk/` (source only — the static
+libs are built as part of the build, not committed), so no separate SDK download
+is needed.
+
+### Easiest: build.bat
+
+Open the **Developer Command Prompt that matches your target** (x86 prompt for
+Win32, x64 prompt for x64), then from the repo root:
 
 ```bat
-:: --- 32-bit (use the x86 Developer Command Prompt) ---
+build.bat Win32      :: 32-bit
+build.bat x64        :: 64-bit
+```
+
+The script cleans stale artifacts, builds the three SDK libs, then the
+component. Output: `bin\<Platform>\Release\foo_strip.dll`.
+
+For a 64-bit install, rename that output to `foo_strip-x64.dll` (see Install).
+
+### Manual
+
+If you'd rather run the steps yourself (same as the script), for each platform
+build the three SDK libs first, then the component — e.g. for Win32:
+
+```bat
 msbuild lib\foobar_sdk\foobar2000\SDK\foobar2000_SDK.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
 msbuild lib\foobar_sdk\pfc\pfc.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
 msbuild lib\foobar_sdk\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
 msbuild foo_strip.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
-
-:: --- 64-bit (use the x64 Developer Command Prompt) ---
-msbuild lib\foobar_sdk\foobar2000\SDK\foobar2000_SDK.vcxproj /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143
-msbuild lib\foobar_sdk\pfc\pfc.vcxproj /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143
-msbuild lib\foobar_sdk\foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143
-msbuild foo_strip.vcxproj /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143
 ```
 
-Output: `bin\Win32\Release\foo_strip.dll` and `bin\x64\Release\foo_strip.dll`.
-Install the one matching your foobar2000 architecture. `shared-Win32.lib` and
-`shared-x64.lib` both ship prebuilt in the SDK; the other three libs you build
-per-platform as shown.
-
-Using the SDK from a different location instead of the vendored copy? Override:
-```bat
-msbuild foo_strip.vcxproj /p:SdkRoot=C:\path\to\sdk\ /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
-```
+Use `/p:Platform=x64` for the 64-bit build. The prebuilt `shared-Win32.lib` /
+`shared-x64.lib` ship with the SDK; the other three libs are built by the
+commands above.
 
 ## Project layout
 
@@ -77,8 +85,9 @@ foo_strip.cpp        component plumbing: initquit + play_callback, direct seek
 StripWindow.cpp      GDI+ window: paint, drag, hit-testing, marquee, fullscreen
 strip_shared.h       shared StripState + cross-file declarations
 stdafx.h / .cpp      precompiled header (SDK + Windows includes)
-foo_strip.vcxproj    MSBuild project (Win32 DLL, /MD, PCH)
-lib/foobar_sdk/      vendored SDK (build inputs; see NOTICE.md)
+foo_strip.vcxproj    MSBuild project (Win32/x64 DLL, /MD, PCH)
+build.bat            one-command build helper
+lib/foobar_sdk/      vendored SDK source (build inputs; see NOTICE.md)
 ```
 
 ## License
