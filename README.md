@@ -10,7 +10,7 @@ Windows, inspired by Deskband Controls. Album art, scrolling title/artist, trans
 seek bar — floating over your desktop, independent of foobar's own window. Reads position/length and seeks **directly**
 through foobar's `playback_control` (no SMTC, no bridge).
 
-This is a personal project to solve the problem that Windows 11 doesn't allow taskbar plugins anymore, which means Deskband Controls is no longer available. This project is build using Claude, Opus 4.8, for personal use.
+This is a personal project to solve the problem that Windows 11 doesn't allow taskbar plugins anymore, which means Deskband Controls is no longer available. Since nobody seems to be interested in picking up where Eldarien left off, I asked Claude, Opus 4.8, to build me this for personal use. PRs welcome, especially for build/optimization improvements.
 
 > Independent, unofficial component for foobar2000. Not affiliated with or
 > endorsed by the foobar2000 project. See [NOTICE.md](NOTICE.md).
