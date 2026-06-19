@@ -18,7 +18,9 @@ This is a personal project to solve the problem that Windows 11 doesn't allow ta
 ## Features
 
 - Floating, draggable window
+  - Hold down shift to snap to edges of your screen
   - Remembers its previous position upon restart
+- Scales with DPI
 - Album art, title (continuous marquee when long), artist
   - Album art pop-up on hover, and its position depends on where the strip is (pops up below the strip if there are no space on top)
 - Previous / play-pause / next with hover + press feedback
@@ -26,6 +28,7 @@ This is a personal project to solve the problem that Windows 11 doesn't allow ta
 - Hides automatically when a fullscreen game/video is in front
 - Right-click anywhere in the strip to toggle between light and dark mode
   - Carries over on restart
+  - Also should match your windows theme mode when first installed
 
 ## Install
 
