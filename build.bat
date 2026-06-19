@@ -125,18 +125,24 @@ set "X64=bin\x64\%CONFIG%\foo_strip.dll"
 if not exist "%W32%" ( echo ERROR: missing %W32% & exit /b 1 )
 if not exist "%X64%" ( echo ERROR: missing %X64% & exit /b 1 )
 
+REM foobar2000 packaging convention for a dual-arch component:
+REM   foo_strip.dll          (32-bit, at the archive root)
+REM   x64\foo_strip.dll      (64-bit, in an x64 subfolder)
+REM BOTH are named foo_strip.dll; the architecture is determined by the folder,
+REM not the filename. foobar loads the root DLL for 32-bit, x64\ for 64-bit.
 if exist pkg rmdir /s /q pkg
 mkdir pkg
+mkdir pkg\x64
 copy /y "%W32%" pkg\foo_strip.dll >nul
-copy /y "%X64%" pkg\foo_strip-x64.dll >nul
+copy /y "%X64%" pkg\x64\foo_strip.dll >nul
 
 if exist foo_strip.fb2k-component del /q foo_strip.fb2k-component
 if exist foo_strip.zip del /q foo_strip.zip
-REM Compress-Archive only accepts a .zip destination, so zip to .zip then rename
-REM to .fb2k-component. An explicit file list keeps the DLLs at the archive root
-REM (a folder/wildcard can nest them under pkg\ and foobar rejects that).
-powershell -NoProfile -Command "Compress-Archive -Path 'pkg\foo_strip.dll','pkg\foo_strip-x64.dll' -DestinationPath 'foo_strip.zip' -Force" || exit /b 1
+REM Compress-Archive only accepts a .zip destination, so zip then rename. Zipping
+REM the pkg directory's CONTENTS (root file + x64\ subfolder) preserves the
+REM required layout inside the archive.
+powershell -NoProfile -Command "Compress-Archive -Path 'pkg\foo_strip.dll','pkg\x64' -DestinationPath 'foo_strip.zip' -Force" || exit /b 1
 ren foo_strip.zip foo_strip.fb2k-component
 rmdir /s /q pkg
-echo   -^> foo_strip.fb2k-component  (install via Preferences ^> Components)
+echo   -^> foo_strip.fb2k-component  (foo_strip.dll + x64\foo_strip.dll)
 exit /b 0

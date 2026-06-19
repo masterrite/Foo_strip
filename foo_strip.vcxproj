@@ -58,9 +58,10 @@
     <PlatformToolset>v143</PlatformToolset>
     <UseDebugLibraries>false</UseDebugLibraries>
     <CharacterSet>Unicode</CharacterSet>
-    <!-- WholeProgramOptimization (/GL + /LTCG) conflicts with /OPT:NOREF and can
-         itself strip foobar's service factories. Off for component safety. -->
-    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <!-- LTCG re-enabled for a lean binary. The service factories are kept alive
+         explicitly (see strip_anchor_factories in foo_strip.cpp), so /OPT:REF
+         below is safe. -->
+    <WholeProgramOptimization>true</WholeProgramOptimization>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)'=='Debug'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
@@ -125,14 +126,11 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
     </ClCompile>
     <Link>
-      <!-- CRITICAL for foobar components: /OPT:REF (OptimizeReferences) and
-           /OPT:ICF (COMDATFolding) strip or merge the static service-factory
-           globals that foobar discovers at load time. On x64 Release this
-           produced a DLL with no registered services -> "component has been
-           damaged". Disabling both keeps the factories intact. The size cost is
-           negligible for a component this small. -->
-      <EnableCOMDATFolding>false</EnableCOMDATFolding>
-      <OptimizeReferences>false</OptimizeReferences>
+      <!-- Optimizations re-enabled. The service factories that foobar discovers
+           at load are kept from /OPT:REF stripping by strip_anchor_factories()
+           in foo_strip.cpp, which references them from code that always runs. -->
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">

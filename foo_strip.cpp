@@ -37,15 +37,10 @@ DECLARE_COMPONENT_VERSION(
     "A draggable floating strip with album art, title, transport, and a working "
     "seek bar. Reads playback directly in-process.\n");
 
-// Prevent the component .dll from being renamed. The expected filename differs
-// by architecture: 64-bit foobar2000 components carry an "-x64" suffix and live
-// in user-components-x64\, while 32-bit components are plain and live in
-// user-components\. A single hardcoded name can't satisfy both, so pick per arch.
-#ifdef _WIN64
-VALIDATE_COMPONENT_FILENAME("foo_strip-x64.dll");
-#else
+// The packaged component contains foo_strip.dll (32-bit, at the archive root)
+// and x64\foo_strip.dll (64-bit, in the x64 subfolder) — both named the same,
+// per foobar's packaging convention. So a single filename validates both.
 VALIDATE_COMPONENT_FILENAME("foo_strip.dll");
-#endif
 
 // The single shared StripState instance (declared in strip_shared.h).
 StripState g_state;
@@ -233,12 +228,17 @@ void strip_play_callback::load_album_art() {
 
 static play_callback_static_factory_t<strip_play_callback> g_play_cb_factory;
 
+// Defined after the factories below; touching the factory addresses from here
+// (called in on_init) keeps MSVC /OPT:REF from stripping them.
+static void strip_anchor_factories();
+
 // ----------------------------------------------------------------------------
 // initquit — create the floating window once foobar's main window exists.
 // ----------------------------------------------------------------------------
 class strip_initquit : public initquit {
 public:
     void on_init() override {
+        strip_anchor_factories();
         strip_create_window();
         // Prime initial state in case playback is already running.
         if (playback_control::get()->is_playing()) {
@@ -256,6 +256,15 @@ public:
 };
 
 static initquit_factory_t<strip_initquit> g_initquit_factory;
+
+// Anchor: reference both factory globals through a volatile sink so the linker
+// keeps them under /OPT:REF (MSVC has no built-in retention for these). Called
+// once from on_init, which always runs.
+static void strip_anchor_factories() {
+    static void* volatile keep[2];
+    keep[0] = (void*)&g_play_cb_factory;
+    keep[1] = (void*)&g_initquit_factory;
+}
 
 } // namespace
 
