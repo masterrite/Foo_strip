@@ -66,16 +66,19 @@ jobs:
           name: foo_strip-x64
           path: dist/x64
 
-      # foobar2000 loads the architecture-appropriate DLL from a component
-      # package. Convention: 32-bit = foo_strip.dll, 64-bit = foo_strip-x64.dll,
-      # both inside the same .fb2k-component (a zip).
+      # foobar2000 dual-arch packaging convention:
+      #   foo_strip.dll       (32-bit, archive root)
+      #   x64/foo_strip.dll   (64-bit, x64 subfolder)
+      # Both named foo_strip.dll; architecture is determined by folder.
       - name: Assemble component package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path pkg | Out-Null
+          New-Item -ItemType Directory -Force -Path pkg/x64 | Out-Null
           Copy-Item dist/win32/foo_strip.dll pkg/foo_strip.dll
-          Copy-Item dist/x64/foo_strip.dll   pkg/foo_strip-x64.dll
-          Compress-Archive -Path pkg/* -DestinationPath foo_strip.fb2k-component
+          Copy-Item dist/x64/foo_strip.dll   pkg/x64/foo_strip.dll
+          Compress-Archive -Path pkg/foo_strip.dll,pkg/x64 -DestinationPath foo_strip.zip
+          Rename-Item foo_strip.zip foo_strip.fb2k-component
           # Also expose the raw DLLs with architecture-tagged names for the release.
           Copy-Item dist/win32/foo_strip.dll foo_strip-Win32.dll
           Copy-Item dist/x64/foo_strip.dll   foo_strip-x64.dll
@@ -87,3 +90,4 @@ jobs:
             foo_strip.fb2k-component
             foo_strip-Win32.dll
             foo_strip-x64.dll
+          generate_release_notes: true
