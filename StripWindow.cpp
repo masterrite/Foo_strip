@@ -147,7 +147,8 @@ double g_title_avail = 0.0;      // available px in the title area
 
 // Geometry of interactive regions, recomputed each paint.
 RECT g_rcPrev{}, g_rcPlay{}, g_rcNext{}, g_rcSeek{};
-RECT g_rcVol{};                      // volume slider track rect
+RECT g_rcVol{};                      // volume slider track rect (visual)
+RECT g_rcVolHit{};                   // volume slider hit-test rect (generous)
 RECT g_rcMute{};                     // speaker / mute-toggle icon rect
 bool g_volScrubbing = false;         // dragging the volume slider
 
@@ -330,6 +331,11 @@ void paint(HWND hwnd) {
         int volRight = W - kPad();
         int volLeft = volRight - volW;
         g_rcVol = { volLeft, bandMid - S(5), volRight, bandMid + S(5) };
+        // Generous hit-test region: taller than the thin track and extended a
+        // thumb-radius past each end, so grabbing the thumb circle (or near it)
+        // registers as the slider instead of falling through to a window drag.
+        int volHitPad = S(7);
+        g_rcVolHit = { volLeft - volHitPad, btnTop, volRight + volHitPad, btnBot };
         g_rcMute = { volLeft - muteW - S(2), bandMid - muteW / 2,
                      volLeft - S(2), bandMid + muteW / 2 };
 
@@ -417,22 +423,21 @@ void paint(HWND hwnd) {
                 g.DrawArc(&pen, (REAL)mcx - Sf(1), (REAL)mcy - Sf(4), Sf(6), Sf(8), -60.0f, 120.0f);
             }
 
-            // Volume slider track.
+            // Volume as a fillable bar (no thumb): a background bar with an
+            // accent fill from the left proportional to volume. The whole bar is
+            // the control, so there's no small thumb to grab — dragging anywhere
+            // on it sets the level. Matches the original Deskband plugin's look.
+            int vBarH = S(8);                          // bar height
             int vTrackY = (g_rcVol.top + g_rcVol.bottom) / 2;
             int vLeft = g_rcVol.left, vRight = g_rcVol.right;
-            int vgh = S(3);
-            SolidBrush vgroove(theme().groove);
+            int vTop = vTrackY - vBarH / 2;
+            SolidBrush vbg(theme().groove);
             SolidBrush vaccent(theme().accent);
-            g.FillRectangle(&vgroove, vLeft, vTrackY - vgh / 2, vRight - vLeft, vgh);
+            g.FillRectangle(&vbg, vLeft, vTop, vRight - vLeft, vBarH);
             double vfrac = muted ? 0.0 : volLinear;
             if (vfrac < 0) vfrac = 0; if (vfrac > 1) vfrac = 1;
             int vfill = (int)((vRight - vLeft) * vfrac);
-            g.FillRectangle(&vaccent, vLeft, vTrackY - vgh / 2, vfill, vgh);
-            // Volume thumb.
-            int vtr = S(4);
-            SolidBrush vthumb(theme().thumb);
-            int vthumbX = vLeft + vfill;
-            g.FillEllipse(&vthumb, vthumbX - vtr, vTrackY - vtr, vtr * 2, vtr * 2);
+            g.FillRectangle(&vaccent, vLeft, vTop, vfill, vBarH);
         }
 
         // ---- Bottom row: seek bar + time ----
@@ -613,7 +618,7 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else if (pt_in(g_rcMute, x, y)) {
             strip_toggle_mute();   // fires on_volume_change -> refresh + repaint
             InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (pt_in(g_rcVol, x, y)) {
+        } else if (pt_in(g_rcVolHit, x, y)) {
             g_volScrubbing = true;
             double f = (double)(x - g_rcVol.left) / (g_rcVol.right - g_rcVol.left);
             strip_set_volume(min(1.0, max(0.0, f))); // fires on_volume_change
