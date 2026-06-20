@@ -23,6 +23,7 @@
 #include <mutex>
 #include <string>
 #include <climits>
+#include <cmath>
 
 #pragma comment(lib, "gdiplus.lib")
 
@@ -51,16 +52,9 @@ StripWindow* g_window = nullptr;
 
 // ----------------------------------------------------------------------------
 // Helpers to pull current playback info from the core (main thread only).
+// refresh_from_core has EXTERNAL linkage (declared in strip_shared.h) so the
+// window code can call it; it is defined just below the anonymous namespace.
 // ----------------------------------------------------------------------------
-void refresh_from_core() {
-    auto pc = playback_control::get();
-
-    std::lock_guard<std::mutex> guard(g_state.lock);
-    g_state.playing = pc->is_playing() && !pc->is_paused();
-    g_state.position = pc->playback_get_position();
-    g_state.length = pc->playback_get_length();
-    g_state.canSeek = pc->playback_can_seek();
-}
 
 // Extract "Artist - Title" via titleformat against the now-playing track.
 void refresh_metadata() {
@@ -90,6 +84,44 @@ void refresh_metadata() {
 
 } // namespace
 
+// External-linkage: called from StripWindow.cpp (declared in strip_shared.h).
+void refresh_from_core() {
+    auto pc = playback_control::get();
+
+    // Read everything from the core FIRST, without holding our lock. foobar can
+    // synchronously fire callbacks (e.g. on_volume_change) from these calls; if
+    // we held g_state.lock here and a callback re-entered refresh_from_core, the
+    // non-recursive mutex would self-deadlock ("resource deadlock would occur").
+    bool playing = pc->is_playing() && !pc->is_paused();
+    double position = pc->playback_get_position();
+    double length = pc->playback_get_length();
+    bool canSeek = pc->playback_can_seek();
+    float db = pc->get_volume();
+    bool muted = pc->is_muted();
+
+    // Map foobar's dB volume to a 0..1 slider position. Volume in dB is
+    // logarithmic, so sliderPos = 10^(dB/coeff). The coefficient 34 is taken
+    // from Eldarien's DeskbandControls (GPL-3.0), whose author tuned it to
+    // "match best with foobar2000 volume control behaviour" — it makes this
+    // slider track foobar's own native volume slider.
+    //   Source: https://github.com/Eldarien/DeskbandControls
+    //   (dcmFoobar2000/Code/Controller.cs, _volumeDbCoeff)
+    const double kVolCoeff = 34.0;
+    double lin;
+    if (db <= -100.0f) lin = 0.0;
+    else lin = pow(10.0, (double)db / kVolCoeff);
+    if (lin < 0) lin = 0; if (lin > 1) lin = 1;
+
+    // Now take the lock only to publish the values (no core calls inside).
+    std::lock_guard<std::mutex> guard(g_state.lock);
+    g_state.playing = playing;
+    g_state.position = position;
+    g_state.length = length;
+    g_state.canSeek = canSeek;
+    g_state.volume_linear = lin;
+    g_state.muted = muted;
+}
+
 namespace {
 
 // ----------------------------------------------------------------------------
@@ -101,7 +133,8 @@ public:
     unsigned get_flags() override {
         return flag_on_playback_new_track | flag_on_playback_stop |
                flag_on_playback_pause | flag_on_playback_seek |
-               flag_on_playback_time | flag_on_playback_dynamic_info_track;
+               flag_on_playback_time | flag_on_playback_dynamic_info_track |
+               flag_on_volume_change;
     }
 
     void on_playback_new_track(metadb_handle_ptr track) override {
@@ -176,7 +209,10 @@ public:
     void on_playback_starting(play_control::t_track_command, bool) override {}
     void on_playback_edited(metadb_handle_ptr) override {}
     void on_playback_dynamic_info(const file_info&) override {}
-    void on_volume_change(float) override {}
+    void on_volume_change(float) override {
+        refresh_from_core();
+        strip_notify_repaint();
+    }
 
 private:
     // Pull album art for the current track and hand a GDI+ bitmap to the state.
@@ -277,6 +313,24 @@ void strip_seek_to(double seconds) {
     if (pc->playback_can_seek()) {
         pc->playback_seek(seconds);
     }
+}
+
+void strip_set_volume(double sliderPos) {
+    // Slider position 0..1 -> dB, inverse of refresh_from_core's mapping:
+    //   dB = coeff * log10(pos), coeff = 34 (matches foobar's native slider,
+    //   per the original Deskband Controls plugin). pos 1.0 -> 0 dB,
+    //   0.5 -> ~-10 dB, 0 -> -100 dB (foobar's floor).
+    const double kVolCoeff = 34.0;
+    if (sliderPos < 0) sliderPos = 0;
+    if (sliderPos > 1) sliderPos = 1;
+    float db = (sliderPos <= 0.0) ? -100.0f
+                                  : (float)(kVolCoeff * log10(sliderPos));
+    if (db < -100.0f) db = -100.0f;
+    playback_control::get()->set_volume(db);
+}
+
+void strip_toggle_mute() {
+    playback_control::get()->volume_mute_toggle();
 }
 
 // ----------------------------------------------------------------------------

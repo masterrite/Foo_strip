@@ -147,6 +147,9 @@ double g_title_avail = 0.0;      // available px in the title area
 
 // Geometry of interactive regions, recomputed each paint.
 RECT g_rcPrev{}, g_rcPlay{}, g_rcNext{}, g_rcSeek{};
+RECT g_rcVol{};                      // volume slider track rect
+RECT g_rcMute{};                     // speaker / mute-toggle icon rect
+bool g_volScrubbing = false;         // dragging the volume slider
 
 // Smooth-position interpolation: between 1Hz on_playback_time callbacks we
 // advance position locally so the scrubber glides instead of stepping.
@@ -171,29 +174,22 @@ std::wstring fmt_time(double secs) {
 // True when a fullscreen app (game / video / presentation) is foreground. Uses
 // the same Shell signal the OS uses to suppress notifications during fullscreen.
 bool is_fullscreen_app_active() {
+    // Hide only for a real fullscreen app/presentation, reported by the Shell's
+    // notification state (does NOT fire for Start menu, taskbar, or flyouts),
+    // and only when that fullscreen context is on the strip's own monitor.
     QUERY_USER_NOTIFICATION_STATE state;
-    if (SHQueryUserNotificationState(&state) == S_OK) {
-        if (state == QUNS_BUSY ||
-            state == QUNS_RUNNING_D3D_FULL_SCREEN ||
-            state == QUNS_PRESENTATION_MODE)
-            return true;
-    }
+    if (SHQueryUserNotificationState(&state) != S_OK) return false;
+    bool shellFullscreen = (state == QUNS_BUSY ||
+                            state == QUNS_RUNNING_D3D_FULL_SCREEN ||
+                            state == QUNS_PRESENTATION_MODE);
+    if (!shellFullscreen) return false;
 
-    // Fallback for borderless-windowed games, which Windows may report as a
-    // normal maximized window: if the foreground window (not ours, not the
-    // desktop/shell) covers its entire monitor, treat it as fullscreen.
     HWND fg = GetForegroundWindow();
-    if (!fg || fg == g_hwnd) return false;
-    if (fg == GetDesktopWindow() || fg == GetShellWindow()) return false;
-
-    RECT wr;
-    if (!GetWindowRect(fg, &wr)) return false;
-    HMONITOR mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO mi{ sizeof(mi) };
-    if (!GetMonitorInfo(mon, &mi)) return false;
-
-    return wr.left <= mi.rcMonitor.left && wr.top <= mi.rcMonitor.top &&
-           wr.right >= mi.rcMonitor.right && wr.bottom >= mi.rcMonitor.bottom;
+    if (!fg) return false;
+    HMONITOR fgMon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+    HMONITOR stripMon = g_hwnd ? MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST)
+                               : fgMon;
+    return fgMon == stripMon;
 }
 
 // ----------------------------------------------------------------------------
@@ -262,7 +258,10 @@ void paint(HWND hwnd) {
         SolidBrush cArtist(theme().title);   // artist same color as title now
 
         int tx = ax + artSize + kPad();
-        int textW = W - tx - (kBtn() * 3) - kPad() * 2;
+        // The top row's right side holds: 3 transport buttons + speaker + volume
+        // slider. The title/artist text must stop before all of that.
+        int rightControls = (kBtn() * 3) + S(18) + S(2) + S(46) + S(4);
+        int textW = W - tx - rightControls - kPad();
         if (textW < 10) textW = 10;
         // Title at top, artist just below. Sized to leave room below for the
         // seek bar with padding from the bottom edge.
@@ -323,7 +322,19 @@ void paint(HWND hwnd) {
         int bh = bandBot - bandTop;                      // highlight height
         int btnTop = bandMid - bh / 2;
         int btnBot = bandMid + bh / 2;
-        g_rcNext = { W - kPad() - kBtn(), btnTop, W - kPad(), btnBot };
+
+        // Right edge of the top row, laid out right-to-left:
+        //   [ prev ][ play ][ next ]  [speaker] [volume slider]
+        int volW = S(46);                                // volume track width
+        int muteW = S(18);                               // speaker icon box
+        int volRight = W - kPad();
+        int volLeft = volRight - volW;
+        g_rcVol = { volLeft, bandMid - S(5), volRight, bandMid + S(5) };
+        g_rcMute = { volLeft - muteW - S(2), bandMid - muteW / 2,
+                     volLeft - S(2), bandMid + muteW / 2 };
+
+        int btnRight = g_rcMute.left - S(4);             // buttons end before speaker
+        g_rcNext = { btnRight - kBtn(), btnTop, btnRight, btnBot };
         g_rcPlay = { g_rcNext.left - kBtn(), btnTop, g_rcNext.left, btnBot };
         g_rcPrev = { g_rcPlay.left - kBtn(), btnTop, g_rcPlay.left, btnBot };
 
@@ -379,6 +390,49 @@ void paint(HWND hwnd) {
             PointF tri[3] = { {(REAL)cx - Sf(6), (REAL)cy - Sf(7)}, {(REAL)cx + Sf(5), (REAL)cy}, {(REAL)cx - Sf(6), (REAL)cy + Sf(7)} };
             g.DrawPolygon(&pen, tri, 3);
             g.DrawLine(&pen, (REAL)cx + Sf(7), (REAL)cy - Sf(7), (REAL)cx + Sf(7), (REAL)cy + Sf(7));
+        }
+
+        // ---- Volume: speaker icon (mute toggle) + slider ----
+        {
+            // Still inside the paint lock scope, so read directly from st.
+            double volLinear = st.volume_linear;
+            bool muted = st.muted;
+
+            int mcx = (g_rcMute.left + g_rcMute.right) / 2;
+            int mcy = (g_rcMute.top + g_rcMute.bottom) / 2;
+            // Speaker body (small trapezoid-ish): a rectangle + triangle cone.
+            g.DrawLine(&pen, (REAL)mcx - Sf(5), (REAL)mcy - Sf(2), (REAL)mcx - Sf(5), (REAL)mcy + Sf(2)); // back
+            PointF spk[4] = {
+                {(REAL)mcx - Sf(5), (REAL)mcy - Sf(2)},
+                {(REAL)mcx - Sf(1), (REAL)mcy - Sf(5)},
+                {(REAL)mcx - Sf(1), (REAL)mcy + Sf(5)},
+                {(REAL)mcx - Sf(5), (REAL)mcy + Sf(2)} };
+            g.DrawPolygon(&pen, spk, 4);
+            if (muted) {
+                // Muted: an X to the right of the speaker.
+                g.DrawLine(&pen, (REAL)mcx + Sf(1), (REAL)mcy - Sf(3), (REAL)mcx + Sf(5), (REAL)mcy + Sf(3));
+                g.DrawLine(&pen, (REAL)mcx + Sf(5), (REAL)mcy - Sf(3), (REAL)mcx + Sf(1), (REAL)mcy + Sf(3));
+            } else {
+                // Sound waves: two small arcs.
+                g.DrawArc(&pen, (REAL)mcx - Sf(1), (REAL)mcy - Sf(4), Sf(6), Sf(8), -60.0f, 120.0f);
+            }
+
+            // Volume slider track.
+            int vTrackY = (g_rcVol.top + g_rcVol.bottom) / 2;
+            int vLeft = g_rcVol.left, vRight = g_rcVol.right;
+            int vgh = S(3);
+            SolidBrush vgroove(theme().groove);
+            SolidBrush vaccent(theme().accent);
+            g.FillRectangle(&vgroove, vLeft, vTrackY - vgh / 2, vRight - vLeft, vgh);
+            double vfrac = muted ? 0.0 : volLinear;
+            if (vfrac < 0) vfrac = 0; if (vfrac > 1) vfrac = 1;
+            int vfill = (int)((vRight - vLeft) * vfrac);
+            g.FillRectangle(&vaccent, vLeft, vTrackY - vgh / 2, vfill, vgh);
+            // Volume thumb.
+            int vtr = S(4);
+            SolidBrush vthumb(theme().thumb);
+            int vthumbX = vLeft + vfill;
+            g.FillEllipse(&vthumb, vthumbX - vtr, vTrackY - vtr, vtr * 2, vtr * 2);
         }
 
         // ---- Bottom row: seek bar + time ----
@@ -451,15 +505,20 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_hiddenForFullscreen = false;
                 ShowWindow(hwnd, SW_SHOWNA); // show without activating
             }
+        }
 
-            // Re-assert topmost z-order. A one-time WS_EX_TOPMOST at creation
-            // isn't enough to stay above the taskbar (itself topmost) or other
-            // topmost windows that leapfrog us. Nudging back to HWND_TOPMOST
-            // ~1/sec keeps the strip visible without moving/activating it.
-            if (!g_hiddenForFullscreen) {
-                SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            }
+        // Re-assert topmost z-order frequently (every ~200ms, separate from the
+        // 1s fullscreen check). A one-time WS_EX_TOPMOST isn't enough to stay
+        // above the taskbar — when the strip sits ON the taskbar and you open
+        // Start, click a taskbar item, or switch monitors, the taskbar raises
+        // above the strip. Frequent re-assertion pulls it back promptly. This is
+        // the ceiling for a normal window; we can't permanently beat the taskbar,
+        // but ~5x/sec keeps it visible in practice.
+        static ULONGLONG s_lastTop = 0;
+        if (!g_hiddenForFullscreen && now - s_lastTop >= 200) {
+            s_lastTop = now;
+            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
         if (g_hiddenForFullscreen) return 0; // nothing to draw while hidden
 
@@ -531,6 +590,7 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         bool needsRepaint = !g_moveLoopActive && (
             (st.playing && !g_scrubbing) ||  // seek bar advancing
             g_scrubbing ||                   // user dragging the scrubber
+            g_volScrubbing ||                // user dragging the volume slider
             g_pending_seek ||                // holding post-seek position
             marqueeActive ||                 // title scrolling
             g_pressed_btn != 0 ||            // button pressed
@@ -549,6 +609,14 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_scrubbing = true;
             double f = (double)(x - g_rcSeek.left) / (g_rcSeek.right - g_rcSeek.left);
             g_scrub_preview = min(1.0, max(0.0, f));
+            InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (pt_in(g_rcMute, x, y)) {
+            strip_toggle_mute();   // fires on_volume_change -> refresh + repaint
+            InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (pt_in(g_rcVol, x, y)) {
+            g_volScrubbing = true;
+            double f = (double)(x - g_rcVol.left) / (g_rcVol.right - g_rcVol.left);
+            strip_set_volume(min(1.0, max(0.0, f))); // fires on_volume_change
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (pt_in(g_rcPrev, x, y) || pt_in(g_rcPlay, x, y) || pt_in(g_rcNext, x, y)) {
             // Record which button is pressed for visual feedback; fired on up.
@@ -610,12 +678,22 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_scrub_preview = min(1.0, max(0.0, f));
             InvalidateRect(hwnd, nullptr, FALSE);
         }
+        if (g_volScrubbing) {
+            double f = (double)(x - g_rcVol.left) / (g_rcVol.right - g_rcVol.left);
+            strip_set_volume(min(1.0, max(0.0, f))); // on_volume_change refreshes
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
         return 0;
     }
 
     case WM_LBUTTONUP: {
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
         ReleaseCapture();
+
+        if (g_volScrubbing) {
+            g_volScrubbing = false;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
 
         if (g_scrubbing) {
             g_scrubbing = false;
@@ -725,19 +803,21 @@ LRESULT CALLBACK ArtPopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         Graphics g(mem);
         g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
 
-        // Fill the popup with the album art, then a thin border around it.
+        // Backdrop fills the popup; the art sits inset inside it so the backdrop
+        // shows as a padded frame around the cover (the original look).
+        int inset = S(6);
+        SolidBrush bg(theme().popupBg);
+        g.FillRectangle(&bg, 0, 0, W, H);
         {
             auto& st = strip_get_state();
             std::lock_guard<std::mutex> guard(st.lock);
             if (st.art) {
-                g.DrawImage(st.art, 0, 0, W, H);
+                g.DrawImage(st.art, inset, inset, W - inset * 2, H - inset * 2);
             } else {
                 SolidBrush ph(theme().artPh);
-                g.FillRectangle(&ph, 0, 0, W, H);
+                g.FillRectangle(&ph, inset, inset, W - inset * 2, H - inset * 2);
             }
         }
-        Pen border(theme().popupBorder, Sf(1));
-        g.DrawRectangle(&border, 0, 0, W - 1, H - 1);
 
         BitBlt(hdc, 0, 0, W, H, mem, 0, 0, SRCCOPY);
         SelectObject(mem, old);
@@ -814,14 +894,24 @@ static void CALLBACK MoveSizeEventProc(HWINEVENTHOOK, DWORD event, HWND,
         }
     }
     else if (event == EVENT_SYSTEM_FOREGROUND) {
-        // Another window came to the foreground — e.g. you clicked Start, a
-        // taskbar item, or closed a window. The shell/taskbar can jump above our
-        // topmost strip, so re-assert HWND_TOPMOST immediately rather than
-        // waiting for the ~1s timer. This keeps the strip visible over the
-        // taskbar during those interactions.
-        if (g_hwnd && !g_hiddenForFullscreen) {
-            SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        // Another window came to the foreground — clicked Start, a taskbar item,
+        // closed a window, switched apps. Re-evaluate hide state IMMEDIATELY so
+        // the strip shows/hides without waiting up to a second for the timer
+        // (this is why closing the Start menu used to leave it hidden until the
+        // next click). Then re-assert topmost if visible.
+        if (g_hwnd) {
+            bool fs = is_fullscreen_app_active();
+            if (fs && !g_hiddenForFullscreen) {
+                g_hiddenForFullscreen = true;
+                ShowWindow(g_hwnd, SW_HIDE);
+            } else if (!fs && g_hiddenForFullscreen) {
+                g_hiddenForFullscreen = false;
+                ShowWindow(g_hwnd, SW_SHOWNA);
+            }
+            if (!g_hiddenForFullscreen) {
+                SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
         }
     }
 }
