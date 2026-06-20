@@ -90,4 +90,3 @@ jobs:
             foo_strip.fb2k-component
             foo_strip-Win32.dll
             foo_strip-x64.dll
-          generate_release_notes: true
