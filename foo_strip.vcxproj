@@ -147,6 +147,7 @@
     </ClCompile>
     <ClCompile Include="foo_strip.cpp" />
     <ClCompile Include="StripWindow.cpp" />
+    <ClCompile Include="StripPrefs.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="stdafx.h" />

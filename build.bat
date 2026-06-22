@@ -130,19 +130,20 @@ REM   foo_strip.dll          (32-bit, at the archive root)
 REM   x64\foo_strip.dll      (64-bit, in an x64 subfolder)
 REM BOTH are named foo_strip.dll; the architecture is determined by the folder,
 REM not the filename. foobar loads the root DLL for 32-bit, x64\ for 64-bit.
-if exist pkg rmdir /s /q pkg
-mkdir pkg
-mkdir pkg\x64
-copy /y "%W32%" pkg\foo_strip.dll >nul
-copy /y "%X64%" pkg\x64\foo_strip.dll >nul
+REM We zip the built DLLs directly (no staging folder needed).
 
 if exist foo_strip.fb2k-component del /q foo_strip.fb2k-component
 if exist foo_strip.zip del /q foo_strip.zip
-REM Compress-Archive only accepts a .zip destination, so zip then rename. Zipping
-REM the pkg directory's CONTENTS (root file + x64\ subfolder) preserves the
-REM required layout inside the archive.
-powershell -NoProfile -Command "Compress-Archive -Path 'pkg\foo_strip.dll','pkg\x64' -DestinationPath 'foo_strip.zip' -Force" || exit /b 1
+REM Build the zip by adding the two FILE entries explicitly. We do NOT use
+REM Compress-Archive (PowerShell 5.1 writes entries foobar can't parse) and we
+REM do NOT use ZipFile.CreateFromDirectory either, because that adds a standalone
+REM "x64/" DIRECTORY entry to the archive. foobar2000's extractor chokes on that
+REM empty-directory entry: its "overwrite root DLL with the x64\ DLL" step fails,
+REM so 64-bit foobar loads the 32-bit root DLL ("not a valid Win32 application").
+REM Adding only the two file entries (foo_strip.dll and x64/foo_strip.dll, with
+REM the x64 folder IMPLIED by the path) matches what 7-Zip / the GitHub CI build
+REM produce and installs correctly.
+powershell -NoProfile -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; $zip=[System.IO.Compression.ZipFile]::Open('foo_strip.zip','Create'); [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, '%W32%', 'foo_strip.dll'); [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, '%X64%', 'x64/foo_strip.dll'); $zip.Dispose()" || exit /b 1
 ren foo_strip.zip foo_strip.fb2k-component
-rmdir /s /q pkg
-echo   -^> foo_strip.fb2k-component  (foo_strip.dll + x64\foo_strip.dll)
+echo   -^> foo_strip.fb2k-component  (foo_strip.dll + x64/foo_strip.dll)
 exit /b 0

@@ -34,7 +34,7 @@ namespace {
 // ----------------------------------------------------------------------------
 DECLARE_COMPONENT_VERSION(
     "Floating Playback Strip",
-    "1.0.0",
+    "1.3.0",
     "A draggable floating strip with album art, title, transport, and a working "
     "seek bar. Reads playback directly in-process.\n");
 
@@ -293,13 +293,43 @@ public:
 
 static initquit_factory_t<strip_initquit> g_initquit_factory;
 
+// ---- Main menu command: toggle strip visibility ----------------------------
+// Registers a command under View menu that flips the master "Show strip" setting
+// and applies it. Because it's a mainmenu_commands service, foobar also exposes
+// it for keyboard shortcuts and for binding to toolbar buttons (e.g. ColumnUI).
+static const GUID g_guid_toggle_strip =
+    { 0x9a3f1c40, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x60 } };
+
+class strip_mainmenu : public mainmenu_commands {
+public:
+    t_uint32 get_command_count() override { return 1; }
+    GUID get_command(t_uint32 index) override {
+        return index == 0 ? g_guid_toggle_strip : pfc::guid_null;
+    }
+    void get_name(t_uint32 index, pfc::string_base& out) override {
+        if (index == 0) out = "Toggle floating strip";
+    }
+    bool get_description(t_uint32 index, pfc::string_base& out) override {
+        if (index == 0) { out = "Show or hide the floating playback strip."; return true; }
+        return false;
+    }
+    GUID get_parent() override { return mainmenu_groups::view; }
+    void execute(t_uint32 index, service_ptr_t<service_base>) override {
+        if (index != 0) return;
+        strip_save_show_strip(!strip_load_show_strip());
+        strip_apply_visibility();
+    }
+};
+static mainmenu_commands_factory_t<strip_mainmenu> g_mainmenu_factory;
+
 // Anchor: reference both factory globals through a volatile sink so the linker
 // keeps them under /OPT:REF (MSVC has no built-in retention for these). Called
 // once from on_init, which always runs.
 static void strip_anchor_factories() {
-    static void* volatile keep[2];
+    static void* volatile keep[3];
     keep[0] = (void*)&g_play_cb_factory;
     keep[1] = (void*)&g_initquit_factory;
+    keep[2] = (void*)&g_mainmenu_factory;
 }
 
 } // namespace
@@ -346,6 +376,159 @@ static cfg_bool g_cfg_dark_mode(
 void strip_save_dark_mode(bool dark) { g_cfg_dark_mode = dark; }
 bool strip_load_dark_mode() { return g_cfg_dark_mode; }
 
+// Theme mode: 0=Light, 1=Dark, 2=Follow system, 3=Custom. Replaces the old
+// dark/light bool as the source of truth (the bool is kept above only so old
+// configs still load). Default 1 = Dark.
+static cfg_int g_cfg_theme_mode(
+    GUID{ 0x9a3f1c21, 0x4b7e, 0x4e8a,
+          { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x45 } }, 1);
+
+int  strip_load_theme_mode()      { int m = (int)g_cfg_theme_mode;
+                                    if (m < 0 || m > 3) m = 1; return m; }
+void strip_save_theme_mode(int m) { if (m < 0 || m > 3) m = 1;
+                                    g_cfg_theme_mode = m; }
+
+// Custom colors (used only when theme mode == 3 / Custom). Stored as 0x00RRGGBB.
+// Index contract shared with StripPrefs.cpp / theme():
+//   0 background, 1 text (title+artist+time), 2 buttons (icons),
+//   3 bar fill (accent), 4 bar track (groove), 5 popup padding (art backdrop).
+static cfg_int g_cfg_col0(GUID{ 0x9a3f1c22, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x46 } }, (24 << 16)  | (26 << 8)  | 31);
+static cfg_int g_cfg_col1(GUID{ 0x9a3f1c23, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x47 } }, (242 << 16) | (244 << 8) | 248);
+static cfg_int g_cfg_col2(GUID{ 0x9a3f1c24, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x48 } }, (212 << 16) | (218 << 8) | 227);
+static cfg_int g_cfg_col3(GUID{ 0x9a3f1c25, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x49 } }, (91 << 16)  | (167 << 8) | 245);
+static cfg_int g_cfg_col4(GUID{ 0x9a3f1c26, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x4a } }, (60 << 16)  | (64 << 8)  | 72);
+static cfg_int g_cfg_col5(GUID{ 0x9a3f1c27, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x4b } }, (18 << 16)  | (20 << 8)  | 24);
+
+static cfg_int* color_cfg(int i) {
+    switch (i) {
+        case 0: return &g_cfg_col0; case 1: return &g_cfg_col1;
+        case 2: return &g_cfg_col2; case 3: return &g_cfg_col3;
+        case 4: return &g_cfg_col4; case 5: return &g_cfg_col5;
+        default: return nullptr;
+    }
+}
+int  strip_load_color(int i)         { cfg_int* c = color_cfg(i); return c ? ((int)*c & 0xFFFFFF) : 0; }
+void strip_save_color(int i, int rgb){ cfg_int* c = color_cfg(i); if (c) *c = rgb & 0xFFFFFF; }
+
+// Back-compat shims (background == index 0).
+int  strip_load_color_bg()        { return strip_load_color(0); }
+void strip_save_color_bg(int rgb) { strip_save_color(0, rgb); }
+
+// Album-art popup size (square, in px before DPI scaling). Default 300. Clamped
+// to a range that keeps it usable on small screens / not absurdly large.
+static cfg_int g_cfg_popup_size(
+    GUID{ 0x9a3f1c28, 0x4b7e, 0x4e8a,
+          { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x4c } }, 300);
+
+int  strip_load_popup_size()      { int s = (int)g_cfg_popup_size;
+                                    if (s < 150) s = 150; if (s > 600) s = 600;
+                                    return s; }
+void strip_save_popup_size(int s) { if (s < 150) s = 150; if (s > 600) s = 600;
+                                    g_cfg_popup_size = s; }
+
+// Popup padding alpha (0 = fully transparent backdrop, 255 = fully opaque).
+// Only the padding/backdrop uses this; the album art always draws opaque.
+// Default 255 keeps the original solid look until the user dials it down.
+static cfg_int g_cfg_popup_alpha(
+    GUID{ 0x9a3f1c2d, 0x4b7e, 0x4e8a,
+          { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x51 } }, 255);
+
+int  strip_load_popup_alpha()      { int a = (int)g_cfg_popup_alpha;
+                                     if (a < 0) a = 0; if (a > 255) a = 255; return a; }
+void strip_save_popup_alpha(int a) { if (a < 0) a = 0; if (a > 255) a = 255;
+                                     g_cfg_popup_alpha = a; }
+
+// Strip background alpha (0 = fully see-through, 255 = opaque). Only the strip's
+// background fill uses this; all content (art/text/buttons/bars) stays opaque.
+// Default 255 keeps the original solid look until the user dials it down.
+static cfg_int g_cfg_bg_alpha(
+    GUID{ 0x9a3f1c2e, 0x4b7e, 0x4e8a,
+          { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x52 } }, 255);
+
+int  strip_load_bg_alpha()      { int a = (int)g_cfg_bg_alpha;
+                                  if (a < 0) a = 0; if (a > 255) a = 255; return a; }
+void strip_save_bg_alpha(int a) { if (a < 0) a = 0; if (a > 255) a = 255;
+                                  g_cfg_bg_alpha = a; }
+
+// Icon base sizes (px at default height; scaled by height like fonts). Index:
+// 0 = transport (prev/play/next), 1 = speaker (volume/mute). Defaults match the
+// previous hardcoded US(20)/US(14).
+static cfg_int g_cfg_icon_transport(
+    GUID{ 0x9a3f1c2f, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x53 } }, 20);
+static cfg_int g_cfg_icon_speaker(
+    GUID{ 0x9a3f1c30, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x54 } }, 14);
+
+static cfg_int* icon_cfg(int which) {
+    switch (which) { case 0: return &g_cfg_icon_transport;
+                     case 1: return &g_cfg_icon_speaker; default: return nullptr; }
+}
+int  strip_load_icon_size(int which)       { cfg_int* c = icon_cfg(which); if (!c) return 20;
+                                             int s = (int)*c; if (s < 8) s = 8; if (s > 60) s = 60; return s; }
+void strip_save_icon_size(int which, int s){ cfg_int* c = icon_cfg(which); if (!c) return;
+                                             if (s < 8) s = 8; if (s > 60) s = 60; *c = s; }
+
+// Show/hide the volume bar + speaker icon. When hidden, the transport buttons
+// reflow right to fill the space. Default true (shown).
+static cfg_bool g_cfg_show_volume(
+    GUID{ 0x9a3f1c31, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x55 } }, true);
+
+bool strip_load_show_volume()        { return g_cfg_show_volume; }
+void strip_save_show_volume(bool s)  { g_cfg_show_volume = s; }
+
+// Master strip visibility. When false the whole strip window is hidden; the only
+// way back is this setting (the strip isn't there to click). Persists across
+// restarts (the create path respects it). Default true (shown).
+static cfg_bool g_cfg_show_strip(
+    GUID{ 0x9a3f1c34, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x58 } }, true);
+
+bool strip_load_show_strip()        { return g_cfg_show_strip; }
+void strip_save_show_strip(bool s)  { g_cfg_show_strip = s; }
+
+// Control spacing (px at default width; scaled by width). Index 0 = gap between
+// transport buttons (default 0, i.e. flush), 1 = gap between the button group
+// and the volume control (default 4, the old fixed value).
+static cfg_int g_cfg_space_btn(
+    GUID{ 0x9a3f1c32, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x56 } }, 0);
+static cfg_int g_cfg_space_vol(
+    GUID{ 0x9a3f1c33, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x57 } }, 4);
+
+static cfg_int* space_cfg(int which) {
+    switch (which) { case 0: return &g_cfg_space_btn;
+                     case 1: return &g_cfg_space_vol; default: return nullptr; }
+}
+int  strip_load_spacing(int which)       { cfg_int* c = space_cfg(which); if (!c) return 0;
+                                           int s = (int)*c; if (s < 0) s = 0; if (s > 40) s = 40; return s; }
+void strip_save_spacing(int which, int s){ cfg_int* c = space_cfg(which); if (!c) return;
+                                           if (s < 0) s = 0; if (s > 40) s = 40; *c = s; }
+
+// Font face (family name). cfg_string persists a UTF-8 string. Empty default
+// means "use the built-in default" (Segoe UI), resolved in the paint code.
+static cfg_string g_cfg_font_face(
+    GUID{ 0x9a3f1c29, 0x4b7e, 0x4e8a,
+          { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x4d } }, "Segoe UI");
+
+void strip_load_font_face(pfc::string_base& out) { out = g_cfg_font_face; }
+void strip_save_font_face(const char* face)       { g_cfg_font_face = face; }
+
+// Font sizes (px, pre-DPI) for title / artist / time. Defaults match the
+// original hardcoded relative sizes (13 / 10 / 12). Clamped to a sane range.
+static cfg_int g_cfg_font_title(
+    GUID{ 0x9a3f1c2a, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x4e } }, 13);
+static cfg_int g_cfg_font_artist(
+    GUID{ 0x9a3f1c2b, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x4f } }, 10);
+static cfg_int g_cfg_font_time(
+    GUID{ 0x9a3f1c2c, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x50 } }, 12);
+
+static cfg_int* font_cfg(int which) {
+    switch (which) { case 0: return &g_cfg_font_title;
+                     case 1: return &g_cfg_font_artist;
+                     case 2: return &g_cfg_font_time; default: return nullptr; }
+}
+int  strip_load_font_size(int which)       { cfg_int* c = font_cfg(which); if (!c) return 12;
+                                             int s = (int)*c; if (s < 6) s = 6; if (s > 48) s = 48; return s; }
+void strip_save_font_size(int which, int s){ cfg_int* c = font_cfg(which); if (!c) return;
+                                             if (s < 6) s = 6; if (s > 48) s = 48; *c = s; }
+
 // Window position persistence. INT_MIN sentinel = "never moved yet" so the very
 // first run falls back to the default corner. Separate GUIDs per value.
 static const int kPosUnset = INT_MIN;
@@ -369,3 +552,31 @@ bool strip_load_position(int& x, int& y) {
     y = sy;
     return true;
 }
+
+// Strip width (the first customizable layout setting). cfg_int persists it to
+// foobar's config and restores it on startup. Default 300 = the original width.
+// The value is the UNSCALED base width in pixels (DPI scaling is applied on top
+// in kWidth()). Clamped to a sane range when read so a bad value can't make the
+// strip unusable.
+static cfg_int g_cfg_width(
+    GUID{ 0x3d9a2e55, 0x7c1b, 0x4f6d,
+          { 0xa8, 0x23, 0x5e, 0x4f, 0x1c, 0x6b, 0x90, 0x22 } }, 300);
+
+int  strip_load_width()       { int w = (int)g_cfg_width;
+                                if (w < 300) w = 300; if (w > 800) w = 800;
+                                return w; }
+void strip_save_width(int w)  { if (w < 300) w = 300; if (w > 800) w = 800;
+                                g_cfg_width = w; }
+
+// Strip height. Same pattern as width. Default 46 = original height. Clamped to
+// a range that keeps the strip usable (too short clips controls; too tall looks
+// odd on a taskbar). The interior scales with height (see g_contentScale).
+static cfg_int g_cfg_height(
+    GUID{ 0x3d9a2e56, 0x7c1b, 0x4f6d,
+          { 0xa8, 0x23, 0x5e, 0x4f, 0x1c, 0x6b, 0x90, 0x23 } }, 46);
+
+int  strip_load_height()      { int h = (int)g_cfg_height;
+                                if (h < 40) h = 40; if (h > 120) h = 120;
+                                return h; }
+void strip_save_height(int h) { if (h < 40) h = 40; if (h > 120) h = 120;
+                                g_cfg_height = h; }

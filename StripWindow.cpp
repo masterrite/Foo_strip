@@ -22,26 +22,95 @@ namespace {
 // Base (96-DPI / 100%) design dimensions. Actual pixel sizes are these scaled
 // by the monitor DPI at window creation (see g_scale and the k* accessors).
 // Proportions: taller album art, shorter seek row, larger time font.
-const int kBaseWidth  = 300;
-const int kBaseHeight = 46;   // strip height
+// kBaseWidth/kBaseHeight are now read from config (user-customizable). Width
+// drives horizontal stretch (title + bars get more room - the layout math is
+// already width-relative). Height drives the INTERIOR content scale: a taller
+// strip grows the art, buttons, fonts and rows proportionally so it fills the
+// space instead of leaving a band of emptiness.
+const int kDefHeight  = 46;   // the design baseline height (content scale = 1.0)
 const int kBasePad    = 6;
-const int kBaseArt    = 34;   // album art square — taller, fills more height
-const int kBaseBtn    = 34;   // transport button hit size (bigger)
-const int kBaseSeekH  = 10;   // seek row height — shorter
+const int kBaseArt    = 34;   // album art square
+const int kBaseBtn    = 34;   // transport button hit size
+const int kBaseSeekH  = 10;   // seek row height
 
-// DPI scale factor (1.0 at 96 DPI / 100%). Set in strip_create_window.
+// DPI scale factor (1.0 at 96 DPI / 100%). Set in strip_create_window and
+// updated on WM_DPICHANGED.
 double g_scale = 1.0;
 
-// Scaled pixel sizes — recomputed from g_scale. Used everywhere in layout/paint.
-inline int kWidth()  { return (int)(kBaseWidth  * g_scale + 0.5); }
-inline int kHeight() { return (int)(kBaseHeight * g_scale + 0.5); }
-inline int kPad()    { return (int)(kBasePad    * g_scale + 0.5); }
-inline int kArt()    { return (int)(kBaseArt    * g_scale + 0.5); }
-inline int kBtn()    { return (int)(kBaseBtn    * g_scale + 0.5); }
-inline int kSeekH()  { return (int)(kBaseSeekH  * g_scale + 0.5); }
-inline float kFont(float base) { return (float)(base * g_scale); } // scaled font px
-inline int S(int n) { return (int)(n * g_scale + 0.5); }           // scale a literal
-inline float Sf(float n) { return (float)(n * g_scale); }          // scale (float)
+// --- Proper DPI detection -------------------------------------------------
+// foobar2000 v2 runs per-monitor DPI-aware, so the OLD approach of reading
+// GetDeviceCaps(GetDC(nullptr)) returns 96 regardless of the actual monitor
+// scaling - the strip then never grows (or gets bitmap-stretched and blurry).
+// These helpers query the REAL per-window / per-monitor DPI via the modern
+// APIs, loaded dynamically so the component still loads on older Windows.
+static UINT dpi_for_window(HWND hwnd) {
+    HMODULE u = GetModuleHandleW(L"user32.dll");
+    if (u) {
+        typedef UINT (WINAPI *GetDpiForWindow_t)(HWND);
+        auto fn = (GetDpiForWindow_t)GetProcAddress(u, "GetDpiForWindow");
+        if (fn && hwnd) { UINT d = fn(hwnd); if (d) return d; }
+    }
+    return 0;   // unavailable
+}
+static UINT dpi_for_point(POINT pt) {
+    // Used before the window exists: get the DPI of the monitor at a point.
+    HMODULE s = LoadLibraryW(L"shcore.dll");
+    UINT dpi = 0;
+    if (s) {
+        typedef HRESULT (WINAPI *GetDpiForMonitor_t)(HMONITOR, int, UINT*, UINT*);
+        auto fn = (GetDpiForMonitor_t)GetProcAddress(s, "GetDpiForMonitor");
+        if (fn) {
+            HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+            UINT dx = 0, dy = 0;
+            if (SUCCEEDED(fn(mon, 0 /*MDT_EFFECTIVE_DPI*/, &dx, &dy)) && dx) dpi = dx;
+        }
+        FreeLibrary(s);
+    }
+    return dpi;
+}
+// Set g_scale from a DPI value; returns true if it actually changed.
+// Our strip is a layered top-level popup. The size diagnostic proved Windows
+// does NOT bitmap-stretch it under any awareness mode - the window is created
+// at exactly the pixels we request (actual rect == kWidth/kHeight even at 175%).
+// Therefore we ALWAYS scale the layout by the real DPI ratio; there is no
+// Windows stretch to compensate for. (Earlier "double-scaling" was a separate
+// title-clip bug, not a sizing bug.)
+static bool set_scale_from_dpi(UINT dpi) {
+    if (!dpi) dpi = 96;
+    double s = (double)dpi / 96.0;
+    if (s < 1.0) s = 1.0;   // never shrink below the base design size
+    if (s == g_scale) return false;
+    g_scale = s;
+    return true;
+}
+
+// Content scale derived from the configured height vs. the baseline (46). At the
+// default height this is 1.0; at double height it's ~2.0. Multiplies the
+// interior element sizes (buttons, fonts, rows) so they grow with the strip.
+// Album art already follows height directly (H - kPad), so it needs no factor.
+inline double contentScale() {
+    double s = (double)strip_load_height() / (double)kDefHeight;
+    if (s < 1.0) s = 1.0;          // never shrink interior below the baseline
+    return s;
+}
+
+// kWidth/kHeight read the CONFIGURED dimensions (x DPI scale). Interior
+// accessors fold in contentScale() so they grow with height.
+inline int kWidth()  { return (int)(strip_load_width()  * g_scale + 0.5); }
+inline int kHeight() { return (int)(strip_load_height() * g_scale + 0.5); }
+inline int kPad()    { return (int)(kBasePad   * g_scale + 0.5); }
+inline int kArt()    { return (int)(kBaseArt   * g_scale + 0.5); }
+inline int kBtn()    { return (int)(kBaseBtn   * g_scale * contentScale() + 0.5); }
+inline int kSeekH()  { return (int)(kBaseSeekH * g_scale + 0.5); }
+inline float kFont(float base) { return (float)(base * g_scale * contentScale()); }
+inline int S(int n) { return (int)(n * g_scale + 0.5); }
+inline float Sf(float n) { return (float)(n * g_scale); }
+// Content-scaled variants: scale with BOTH DPI and the height content scale, so
+// vertical metrics (text Y positions, row/clip heights) grow in lockstep with
+// the fonts when the strip is made taller. Using plain S()/Sf() for these would
+// keep the boxes the original size while the fonts grew, clipping the text.
+inline int SC(int n) { return (int)(n * g_scale * contentScale() + 0.5); }
+inline float SCf(float n) { return (float)(n * g_scale * contentScale()); }
 
 const wchar_t* kClassName = L"FoobarStripWindow";
 
@@ -58,6 +127,7 @@ bool g_moveLoopActive = false;
 // Hide the strip while a fullscreen app (game, video, presentation) is in front,
 // so it doesn't draw on top of it. Re-shown when back on the desktop.
 bool g_hiddenForFullscreen = false;
+bool g_hiddenByUser = false;   // master "Show strip" toggle (persists)
 
 // Interaction state
 bool g_scrubbing = false;
@@ -74,7 +144,7 @@ bool g_tracking_leave = false; // TrackMouseEvent armed for WM_MOUSELEAVE
 HWND g_artPopup = nullptr;
 bool g_artHover = false;             // mouse currently over the art region
 RECT g_rcArt{};                      // art thumbnail rect (set each paint)
-inline int kPopupSize() { return (int)(300 * g_scale + 0.5); } // enlarged art dim
+inline int kPopupSize() { return (int)(strip_load_popup_size() * g_scale + 0.5); } // enlarged art dim
 const wchar_t* kPopupClass = L"FoobarStripArtPopup";
 
 // Forward declarations (defined after StripProc).
@@ -130,8 +200,46 @@ const Theme kLightTheme = {
     Gdiplus::Color(255, 200, 205, 212),// popupBorder
 };
 
-bool g_darkMode = true;                 // toggled by right-click; persisted
-const Theme& theme() { return g_darkMode ? kDarkTheme : kLightTheme; }
+bool g_darkMode = true;                 // legacy; superseded by theme mode
+
+// Read the Windows app theme from the registry. Returns true if the system is
+// in DARK mode. Used for theme mode 2 (Follow system).
+static bool system_is_dark() {
+    DWORD val = 1, sz = sizeof(val);
+    // AppsUseLightTheme = 0 means dark apps. Default to light (val=1) if missing.
+    if (RegGetValueW(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+            L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &val, &sz) != ERROR_SUCCESS)
+        return false;
+    return val == 0;
+}
+
+// The live theme. Rebuilt per call from the configured theme mode:
+//   0 Light, 1 Dark, 2 Follow-system, 3 Custom (preset base + custom overrides).
+const Theme& theme() {
+    static Theme s_custom;   // rebuilt when in custom mode
+    int mode = strip_load_theme_mode();
+    if (mode == 0) return kLightTheme;
+    if (mode == 1) return kDarkTheme;
+    if (mode == 2) return system_is_dark() ? kDarkTheme : kLightTheme;
+    // mode 3 = Custom: start from the dark preset as a base, then apply the
+    // user's custom colors. Index contract: 0 bg, 1 text, 2 buttons, 3 fill,
+    // 4 track. Text drives title/artist/time; fill drives accent; track drives
+    // groove. Other fields (thumb, popup, etc.) keep the dark-preset base.
+    s_custom = kDarkTheme;
+    auto C = [](int rgb) {
+        return Gdiplus::Color(255, (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+    };
+    s_custom.bg     = C(strip_load_color(0));
+    s_custom.title  = C(strip_load_color(1));
+    s_custom.artist = C(strip_load_color(1));
+    s_custom.time   = C(strip_load_color(1));
+    s_custom.icon   = C(strip_load_color(2));
+    s_custom.accent = C(strip_load_color(3));
+    s_custom.groove = C(strip_load_color(4));
+    s_custom.popupBg = C(strip_load_color(5));
+    return s_custom;
+}
 
 // (2) after releasing a scrub, hold the target position until foobar's reported
 // position catches up, so the thumb doesn't flash back to the old spot.
@@ -165,10 +273,12 @@ inline bool pt_in(const RECT& r, int x, int y) {
 std::wstring fmt_time(double secs) {
     if (secs < 0) secs = 0;
     int s = (int)secs;          // truncate (floor), matching foobar's seekbar
-    int m = s / 60;
+    int h = s / 3600;
+    int m = (s % 3600) / 60;
     s %= 60;
     wchar_t buf[32];
-    swprintf_s(buf, L"%d:%02d", m, s);
+    if (h > 0) swprintf_s(buf, L"%d:%02d:%02d", h, m, s);  // 1:30:00 for >= 1h
+    else       swprintf_s(buf, L"%d:%02d", m, s);          // 3:10 otherwise
     return buf;
 }
 
@@ -197,26 +307,47 @@ bool is_fullscreen_app_active() {
 // Painting
 // ----------------------------------------------------------------------------
 void paint(HWND hwnd) {
-    PAINTSTRUCT ps;
-    HDC hdc = BeginPaint(hwnd, &ps);
+    RECT rc; GetWindowRect(hwnd, &rc);
+    int W = rc.right - rc.left, H = rc.bottom - rc.top;
+    if (W <= 0 || H <= 0) return;
 
-    RECT rc; GetClientRect(hwnd, &rc);
-    int W = rc.right, H = rc.bottom;
+    // Layered-window pipeline: render into a 32-bit premultiplied-ARGB DIB and
+    // push it via UpdateLayeredWindow (see paint_art_popup_layered). Step 1 keeps
+    // the background fully opaque so this looks identical to the old BitBlt path;
+    // the background alpha setting comes next. Content (art/text/buttons/bars) is
+    // always opaque.
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
 
-    // Double-buffer to avoid flicker.
-    HDC mem = CreateCompatibleDC(hdc);
-    HBITMAP bmp = CreateCompatibleBitmap(hdc, W, H);
-    HBITMAP old = (HBITMAP)SelectObject(mem, bmp);
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = W;
+    bi.bmiHeader.biHeight = -H;          // top-down
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP dib = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HBITMAP old = (HBITMAP)SelectObject(mem, dib);
 
-    Graphics g(mem);
-    g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+    // Draw through a GDI+ Bitmap that wraps the DIB memory as PREMULTIPLIED ARGB.
+    // Going through the bitmap (not the HDC) is what makes GDI+ manage the alpha
+    // channel correctly: antialiased glyph edges and the translucent background
+    // get proper premultiplied alpha, so UpdateLayeredWindow composites them
+    // cleanly. Drawing via the HDC instead leaves edge pixels non-premultiplied,
+    // which shows as black fringing around text on the transparent surface.
+    Bitmap layerBmp(W, H, W * 4, PixelFormat32bppPARGB, (BYTE*)bits);
+    Graphics g(&layerBmp);
+    g.SetTextRenderingHint(TextRenderingHintAntiAlias);
 
-    // Background: fill with smoothing OFF and as a fully opaque base so the
-    // black double-buffer doesn't bleed through at the edges (which showed as a
-    // dark line on the top/left). Antialiasing is enabled afterward for glyphs.
+    // Background fill at the configured alpha (255 = opaque, lower = see-through
+    // over whatever is behind the strip). Content drawn afterward stays opaque,
+    // so only the backing is translucent. The DIB starts zeroed (transparent),
+    // so a sub-255 alpha composites correctly over the desktop.
     g.SetSmoothingMode(SmoothingModeNone);
+    int bgA = strip_load_bg_alpha();
     Color base = theme().bg;
-    SolidBrush bg(Color(255, base.GetR(), base.GetG(), base.GetB()));
+    SolidBrush bg(Color((BYTE)bgA, base.GetR(), base.GetG(), base.GetB()));
     g.FillRectangle(&bg, -1, -1, W + 2, H + 2);
     g.SetSmoothingMode(SmoothingModeAntiAlias);
 
@@ -237,12 +368,52 @@ void paint(HWND hwnd) {
         if (st.length > 0) frac = min(1.0, max(0.0, pos / st.length));
         timeStr = fmt_time(pos) + L" / " + fmt_time(st.length);
 
-        // Album art fills (almost) the full strip height as a square — the
-        // dominant element, matching the mockup. Title/buttons sit to its right,
-        // seek bar spans below to the right of the art.
-        int artSize = H - kPad();              // near-full height, small top/bottom inset
-        int ax = kPad() / 2;
-        int ay = kPad() / 2;
+        // ====================================================================
+        // PROPORTIONAL LAYOUT (scales coherently with height at any DPI).
+        // The strip is two stacked bands inside a small inset:
+        //   * TOP band  (~58% of content height): album art (left), title+artist
+        //     (center-left), transport buttons + volume (right) - all vertically
+        //     centered on topMid.
+        //   * BOT band  (~42%): seek bar + time, vertically centered on botMid.
+        // Every element derives its size/position from these bands and the band
+        // height, so taller strips grow everything together instead of leaving
+        // gaps or letting elements drift independently. 'u' is a unit scale =
+        // band-driven size relative to the original 46px design.
+        // ====================================================================
+        int inset      = kPad() / 2;
+        int contentTop = inset;
+        int contentBot = H - inset;
+        int contentH   = contentBot - contentTop;
+        int topRowH    = (int)(contentH * 0.58 + 0.5);
+        int botRowH    = contentH - topRowH;
+        int topMid     = contentTop + topRowH / 2;
+        int botMid     = contentTop + topRowH + botRowH / 2;
+        // Unit scale: how big the interior is vs. the baseline. Drives button
+        // size, font size, bar thickness - all from ONE factor so nothing drifts.
+        // Baseline contentH at 46px height (DPI 1.0) is ~40px. The baseline MUST
+        // be scaled by g_scale: contentH already includes the DPI factor (H =
+        // configuredHeight x g_scale), so dividing by a bare 40 would re-apply
+        // DPI a second time and the interior would scale by g_scale2 (~4x at
+        // 200%) - buttons/fonts ballooned and clipped. Dividing by 40xg_scale
+        // makes u a pure HEIGHT factor (1.0 at default height, any DPI), and the
+        // single g_scale in US()/USf() supplies the DPI scaling. (Mirrors the
+        // wScale baseline below, which already divides by 300xg_scale.)
+        double u = (double)contentH / (40.0 * g_scale);
+        if (u < 1.0) u = 1.0;
+        auto US = [&](double n) { return (int)(n * g_scale * u + 0.5); };
+        auto USf = [&](double n) { return (float)(n * g_scale * u); };
+
+        // Width-scale: control spacing scales with strip WIDTH (relative to the
+        // 300px default), not height. WS() maps a configured px gap through that
+        // ratio and DPI, so wider strips get proportionally larger gaps.
+        double wScale = (double)W / (300.0 * g_scale);
+        if (wScale < 1.0) wScale = 1.0;
+        auto WS = [&](double n) { return (int)(n * g_scale * wScale + 0.5); };
+
+        // Album art: full-content-height square at the left.
+        int artSize = contentH;
+        int ax = inset;
+        int ay = contentTop;
         g_rcArt = { ax, ay, ax + artSize, ay + artSize }; // hover hit-testing
         if (art) {
             g.DrawImage(art, ax, ay, artSize, artSize);
@@ -251,24 +422,55 @@ void paint(HWND hwnd) {
             g.FillRectangle(&ph, ax, ay, artSize, artSize);
         }
 
-        // ---- Title + artist ----
-        FontFamily ff(L"Segoe UI");
-        Font fTitle(&ff, kFont(13), FontStyleBold, UnitPixel);
-        Font fArtist(&ff, kFont(10), FontStyleRegular, UnitPixel);
+        // ---- Title + artist (stacked, centered on topMid) ----
+        // Font family + per-element sizes come from config (Text settings).
+        wchar_t faceW[128];
+        {
+            pfc::string8 face; strip_load_font_face(face);
+            if (face.is_empty()) face = "Segoe UI";
+            MultiByteToWideChar(CP_UTF8, 0, face.get_ptr(), -1, faceW, 128);
+        }
+        FontFamily ff(faceW);
+        // Fall back to a generic sans family if the configured face is invalid.
+        FontFamily ffFallback(L"Segoe UI");
+        const FontFamily* pff = ff.IsAvailable() ? &ff : &ffFallback;
+        float szTitle  = (float)strip_load_font_size(0);
+        float szArtist = (float)strip_load_font_size(1);
+        Font fTitle(pff, USf(szTitle), FontStyleBold, UnitPixel);
+        Font fArtist(pff, USf(szArtist), FontStyleRegular, UnitPixel);
         SolidBrush cTitle(theme().title);
-        SolidBrush cArtist(theme().title);   // artist same color as title now
+        SolidBrush cArtist(theme().title);
 
         int tx = ax + artSize + kPad();
-        // The top row's right side holds: 3 transport buttons + speaker + volume
-        // slider. The title/artist text must stop before all of that.
-        int rightControls = (kBtn() * 3) + S(18) + S(2) + S(46) + S(4);
+        // Transport buttons + speaker + volume occupy the right of the top band.
+        // Icon base sizes come from config (Text/Icons settings) and still scale
+        // with height via US(). gTran/gSpk are glyph scale factors relative to the
+        // original 20px / 14px designs, applied to the glyph stroke offsets.
+        int iTran = strip_load_icon_size(0);   // transport base px
+        int iSpk  = strip_load_icon_size(1);   // speaker base px
+        double gTran = iTran / 20.0;
+        double gSpk  = iSpk / 14.0;
+        int btnSize = US(iTran);               // transport button hit box
+        int spaceBtn = WS(strip_load_spacing(0));   // gap between transport buttons (width-scaled)
+        int spaceVol = WS(strip_load_spacing(1));   // gap buttons -> volume (width-scaled)
+        bool showVol = strip_load_show_volume();
+        int volWidth = showVol ? US(40) : 0;   // volume bar width (0 if hidden)
+        int muteWidth = showVol ? US(iSpk) : 0;// speaker icon box (0 if hidden)
+        int volGap = showVol ? US(10) : 0;
+        int rightControls = (btnSize * 3) + (spaceBtn * 2) + muteWidth + volWidth + volGap
+                          + (showVol ? spaceVol : 0);
         int textW = W - tx - rightControls - kPad();
         if (textW < 10) textW = 10;
-        // Title at top, artist just below. Sized to leave room below for the
-        // seek bar with padding from the bottom edge.
-        int titleY = S(3);
-        int artistY = titleY + S(15);
-        RectF artistRect((REAL)tx, (REAL)artistY, (REAL)textW, Sf(13));
+
+        // Title sits just above center, artist just below - both centered on
+        // topMid as a pair. Box heights ~1.3x the font size for line height, so
+        // taller fonts get proportional room.
+        int titleH = (int)(USf(szTitle * 1.3f) + 0.5);
+        int artistH = (int)(USf(szArtist * 1.3f) + 0.5);
+        int pairH = titleH + artistH;
+        int titleY = topMid - pairH / 2;
+        int artistY = titleY + titleH;
+        RectF artistRect((REAL)tx, (REAL)artistY, (REAL)textW, (REAL)artistH);
         StringFormat sf;
         sf.SetTrimming(StringTrimmingEllipsisCharacter);
         sf.SetFormatFlags(StringFormatFlagsNoWrap);
@@ -288,7 +490,7 @@ void paint(HWND hwnd) {
 
         Region oldClip;
         g.GetClip(&oldClip);
-        g.SetClip(RectF((REAL)tx, (REAL)titleY, (REAL)textW, Sf(17)));
+        g.SetClip(RectF((REAL)tx, (REAL)titleY, (REAL)textW, (REAL)titleH));
         if (g_title_width > g_title_avail) {
             // Continuous marquee: draw the title twice, separated by a gap. As
             // the first copy scrolls off the left, the second is already filling
@@ -301,48 +503,51 @@ void paint(HWND hwnd) {
             StringFormat sfNo;
             sfNo.SetFormatFlags(StringFormatFlagsNoWrap);
 
-            RectF r1((REAL)tx - off, (REAL)titleY, (REAL)g_title_width + Sf(20), Sf(17));
+            RectF r1((REAL)tx - off, (REAL)titleY, (REAL)g_title_width + Sf(20), (REAL)titleH);
             g.DrawString(title.c_str(), -1, &fTitle, r1, &sfNo, &cTitle);
 
-            RectF r2((REAL)tx - off + span, (REAL)titleY, (REAL)g_title_width + Sf(20), Sf(17));
+            RectF r2((REAL)tx - off + span, (REAL)titleY, (REAL)g_title_width + Sf(20), (REAL)titleH);
             g.DrawString(title.c_str(), -1, &fTitle, r2, &sfNo, &cTitle);
         } else {
-            RectF titleRect((REAL)tx, (REAL)titleY, (REAL)textW, Sf(17));
+            RectF titleRect((REAL)tx, (REAL)titleY, (REAL)textW, (REAL)titleH);
             g.DrawString(title.c_str(), -1, &fTitle, titleRect, &sf, &cTitle);
         }
         g.SetClip(&oldClip);
 
         g.DrawString(artist.c_str(), -1, &fArtist, artistRect, &sf, &cArtist);
 
-        // ---- Transport buttons (right side, in the upper content band) ----
-        // Keep the buttons' vertical extent within the title/artist band so the
-        // hover/press highlight never reaches the seek/time row below.
-        int bandTop = titleY;
-        int bandBot = artistY + S(13);                   // bottom of the artist text
-        int bandMid = (bandTop + bandBot) / 2 - S(2);    // nudged up 2px
-        int bh = bandBot - bandTop;                      // highlight height
-        int btnTop = bandMid - bh / 2;
-        int btnBot = bandMid + bh / 2;
+        // ---- Transport buttons + volume (right side of the TOP band) ----
+        // Everything here centers on topMid and uses the unit-scaled sizes, so
+        // it stays put and grows proportionally as the strip gets taller.
+        int bandMid = topMid;
+        int btnTop = bandMid - btnSize / 2;
+        int btnBot = bandMid + btnSize / 2;
 
-        // Right edge of the top row, laid out right-to-left:
-        //   [ prev ][ play ][ next ]  [speaker] [volume slider]
-        int volW = S(46);                                // volume track width
-        int muteW = S(18);                               // speaker icon box
-        int volRight = W - kPad();
-        int volLeft = volRight - volW;
-        g_rcVol = { volLeft, bandMid - S(5), volRight, bandMid + S(5) };
-        // Generous hit-test region: taller than the thin track and extended a
-        // thumb-radius past each end, so grabbing the thumb circle (or near it)
-        // registers as the slider instead of falling through to a window drag.
-        int volHitPad = S(7);
-        g_rcVolHit = { volLeft - volHitPad, btnTop, volRight + volHitPad, btnBot };
-        g_rcMute = { volLeft - muteW - S(2), bandMid - muteW / 2,
-                     volLeft - S(2), bandMid + muteW / 2 };
-
-        int btnRight = g_rcMute.left - S(4);             // buttons end before speaker
-        g_rcNext = { btnRight - kBtn(), btnTop, btnRight, btnBot };
-        g_rcPlay = { g_rcNext.left - kBtn(), btnTop, g_rcNext.left, btnBot };
-        g_rcPrev = { g_rcPlay.left - kBtn(), btnTop, g_rcPlay.left, btnBot };
+        // Right edge, laid out right-to-left:
+        //   [ prev ][ play ][ next ]  [speaker] [volume bar]
+        // When volume is hidden, the speaker + bar are skipped and the buttons
+        // anchor directly to the right edge (reflow right, no empty gap).
+        int volBarH = US(8);
+        int btnRight;
+        if (showVol) {
+            int volRight = W - kPad();
+            int volLeft  = volRight - volWidth;
+            g_rcVol = { volLeft, bandMid - volBarH / 2, volRight, bandMid + volBarH / 2 };
+            int volHitPad = US(7);
+            g_rcVolHit = { volLeft - volHitPad, btnTop, volRight + volHitPad, btnBot };
+            g_rcMute = { volLeft - muteWidth - US(2), bandMid - muteWidth / 2,
+                         volLeft - US(2), bandMid + muteWidth / 2 };
+            btnRight = g_rcMute.left - spaceVol;         // buttons end before speaker
+        } else {
+            // Volume hidden: no bar/speaker; buttons go to the right edge.
+            g_rcVol = { 0, 0, 0, 0 };
+            g_rcVolHit = { 0, 0, 0, 0 };
+            g_rcMute = { 0, 0, 0, 0 };
+            btnRight = W - kPad();
+        }
+        g_rcNext = { btnRight - btnSize, btnTop, btnRight, btnBot };
+        g_rcPlay = { g_rcNext.left - spaceBtn - btnSize, btnTop, g_rcNext.left - spaceBtn, btnBot };
+        g_rcPrev = { g_rcPlay.left - spaceBtn - btnSize, btnTop, g_rcPlay.left - spaceBtn, btnBot };
 
         // (1) Button feedback: hover = subtle, pressed = stronger. The highlight
         // is inset from the rect so adjacent buttons/time text stay clear.
@@ -362,9 +567,15 @@ void paint(HWND hwnd) {
             drawBtnBg(g_rcNext, 3);
         }
 
-        // Modern outline glyphs: shapes are stroked, not filled. Antialiasing is
-        // already on. Stroke width scales with DPI; round joins/caps look clean.
-        Pen pen(theme().icon, Sf(1.6f));
+        // Modern outline glyphs: shapes are stroked, not filled. Stroke width
+        // and glyph size scale with the strip height (US) so glyphs grow with
+        // their button boxes instead of floating tiny in a large box.
+        // Glyph-offset helpers: scale the hand-tuned offsets by the configured
+        // icon size (relative to the 20px/14px originals). GT = transport, GS =
+        // speaker. Pen width scales with the transport icon.
+        auto GT = [&](double n) { return (REAL)USf(n * gTran); };
+        auto GS = [&](double n) { return (REAL)USf(n * gSpk); };
+        Pen pen(theme().icon, USf(1.6f * gTran));
         pen.SetLineJoin(LineJoinRound);
         pen.SetStartCap(LineCapRound);
         pen.SetEndCap(LineCapRound);
@@ -373,8 +584,8 @@ void paint(HWND hwnd) {
         {
             int cx = (g_rcPrev.left + g_rcPrev.right) / 2;
             int cy = (g_rcPrev.top + g_rcPrev.bottom) / 2;
-            g.DrawLine(&pen, (REAL)cx - Sf(7), (REAL)cy - Sf(7), (REAL)cx - Sf(7), (REAL)cy + Sf(7));
-            PointF t2[3] = { {(REAL)cx + Sf(6), (REAL)cy - Sf(7)}, {(REAL)cx - Sf(5), (REAL)cy}, {(REAL)cx + Sf(6), (REAL)cy + Sf(7)} };
+            g.DrawLine(&pen, (REAL)cx - GT(7), (REAL)cy - GT(7), (REAL)cx - GT(7), (REAL)cy + GT(7));
+            PointF t2[3] = { {(REAL)cx + GT(6), (REAL)cy - GT(7)}, {(REAL)cx - GT(5), (REAL)cy}, {(REAL)cx + GT(6), (REAL)cy + GT(7)} };
             g.DrawPolygon(&pen, t2, 3);
         }
         // play / pause
@@ -382,10 +593,10 @@ void paint(HWND hwnd) {
             int cx = (g_rcPlay.left + g_rcPlay.right) / 2;
             int cy = (g_rcPlay.top + g_rcPlay.bottom) / 2;
             if (playing) {
-                g.DrawLine(&pen, (REAL)cx - Sf(5), (REAL)cy - Sf(8), (REAL)cx - Sf(5), (REAL)cy + Sf(8));
-                g.DrawLine(&pen, (REAL)cx + Sf(5), (REAL)cy - Sf(8), (REAL)cx + Sf(5), (REAL)cy + Sf(8));
+                g.DrawLine(&pen, (REAL)cx - GT(5), (REAL)cy - GT(8), (REAL)cx - GT(5), (REAL)cy + GT(8));
+                g.DrawLine(&pen, (REAL)cx + GT(5), (REAL)cy - GT(8), (REAL)cx + GT(5), (REAL)cy + GT(8));
             } else {
-                PointF tri[3] = { {(REAL)cx - Sf(6), (REAL)cy - Sf(9)}, {(REAL)cx + Sf(9), (REAL)cy}, {(REAL)cx - Sf(6), (REAL)cy + Sf(9)} };
+                PointF tri[3] = { {(REAL)cx - GT(6), (REAL)cy - GT(9)}, {(REAL)cx + GT(9), (REAL)cy}, {(REAL)cx - GT(6), (REAL)cy + GT(9)} };
                 g.DrawPolygon(&pen, tri, 3);
             }
         }
@@ -393,13 +604,13 @@ void paint(HWND hwnd) {
         {
             int cx = (g_rcNext.left + g_rcNext.right) / 2;
             int cy = (g_rcNext.top + g_rcNext.bottom) / 2;
-            PointF tri[3] = { {(REAL)cx - Sf(6), (REAL)cy - Sf(7)}, {(REAL)cx + Sf(5), (REAL)cy}, {(REAL)cx - Sf(6), (REAL)cy + Sf(7)} };
+            PointF tri[3] = { {(REAL)cx - GT(6), (REAL)cy - GT(7)}, {(REAL)cx + GT(5), (REAL)cy}, {(REAL)cx - GT(6), (REAL)cy + GT(7)} };
             g.DrawPolygon(&pen, tri, 3);
-            g.DrawLine(&pen, (REAL)cx + Sf(7), (REAL)cy - Sf(7), (REAL)cx + Sf(7), (REAL)cy + Sf(7));
+            g.DrawLine(&pen, (REAL)cx + GT(7), (REAL)cy - GT(7), (REAL)cx + GT(7), (REAL)cy + GT(7));
         }
 
         // ---- Volume: speaker icon (mute toggle) + slider ----
-        {
+        if (showVol) {
             // Still inside the paint lock scope, so read directly from st.
             double volLinear = st.volume_linear;
             bool muted = st.muted;
@@ -407,27 +618,27 @@ void paint(HWND hwnd) {
             int mcx = (g_rcMute.left + g_rcMute.right) / 2;
             int mcy = (g_rcMute.top + g_rcMute.bottom) / 2;
             // Speaker body (small trapezoid-ish): a rectangle + triangle cone.
-            g.DrawLine(&pen, (REAL)mcx - Sf(5), (REAL)mcy - Sf(2), (REAL)mcx - Sf(5), (REAL)mcy + Sf(2)); // back
+            g.DrawLine(&pen, (REAL)mcx - GS(5), (REAL)mcy - GS(2), (REAL)mcx - GS(5), (REAL)mcy + GS(2)); // back
             PointF spk[4] = {
-                {(REAL)mcx - Sf(5), (REAL)mcy - Sf(2)},
-                {(REAL)mcx - Sf(1), (REAL)mcy - Sf(5)},
-                {(REAL)mcx - Sf(1), (REAL)mcy + Sf(5)},
-                {(REAL)mcx - Sf(5), (REAL)mcy + Sf(2)} };
+                {(REAL)mcx - GS(5), (REAL)mcy - GS(2)},
+                {(REAL)mcx - GS(1), (REAL)mcy - GS(5)},
+                {(REAL)mcx - GS(1), (REAL)mcy + GS(5)},
+                {(REAL)mcx - GS(5), (REAL)mcy + GS(2)} };
             g.DrawPolygon(&pen, spk, 4);
             if (muted) {
                 // Muted: an X to the right of the speaker.
-                g.DrawLine(&pen, (REAL)mcx + Sf(1), (REAL)mcy - Sf(3), (REAL)mcx + Sf(5), (REAL)mcy + Sf(3));
-                g.DrawLine(&pen, (REAL)mcx + Sf(5), (REAL)mcy - Sf(3), (REAL)mcx + Sf(1), (REAL)mcy + Sf(3));
+                g.DrawLine(&pen, (REAL)mcx + GS(1), (REAL)mcy - GS(3), (REAL)mcx + GS(5), (REAL)mcy + GS(3));
+                g.DrawLine(&pen, (REAL)mcx + GS(5), (REAL)mcy - GS(3), (REAL)mcx + GS(1), (REAL)mcy + GS(3));
             } else {
                 // Sound waves: two small arcs.
-                g.DrawArc(&pen, (REAL)mcx - Sf(1), (REAL)mcy - Sf(4), Sf(6), Sf(8), -60.0f, 120.0f);
+                g.DrawArc(&pen, (REAL)mcx - GS(1), (REAL)mcy - GS(4), GS(6), GS(8), -60.0f, 120.0f);
             }
 
             // Volume as a fillable bar (no thumb): a background bar with an
             // accent fill from the left proportional to volume. The whole bar is
-            // the control, so there's no small thumb to grab — dragging anywhere
+            // the control, so there's no small thumb to grab - dragging anywhere
             // on it sets the level. Matches the original Deskband plugin's look.
-            int vBarH = S(8);                          // bar height
+            int vBarH = US(8);                         // bar height (scales w/ height)
             int vTrackY = (g_rcVol.top + g_rcVol.bottom) / 2;
             int vLeft = g_rcVol.left, vRight = g_rcVol.right;
             int vTop = vTrackY - vBarH / 2;
@@ -440,51 +651,89 @@ void paint(HWND hwnd) {
             g.FillRectangle(&vaccent, vLeft, vTop, vfill, vBarH);
         }
 
-        // ---- Bottom row: seek bar + time ----
-        int sy = H - kPad() - kSeekH() / 2;
+        // ---- Bottom band: seek bar + time, centered on botMid ----
         std::wstring t = timeStr;
-        Font fTime(&ff, kFont(12), FontStyleRegular, UnitPixel);
+        float szTime = (float)strip_load_font_size(2);
+        Font fTime(pff, USf(szTime), FontStyleRegular, UnitPixel);
         RectF timeMeasure;
         g.MeasureString(t.c_str(), -1, &fTime, PointF(0, 0), &timeMeasure);
-        int timeW = (int)timeMeasure.Width + 4;
+        int timeW = (int)timeMeasure.Width + US(6);
 
-        // Seek bar starts to the RIGHT of the album art (shorter, like the
-        // mockup) and runs to just before the time text.
         int seekLeft = ax + artSize + kPad();
         int seekRight = W - kPad() - timeW - kPad();
-        if (seekRight < seekLeft + S(20)) seekRight = seekLeft + S(20); // min length
+        if (seekRight < seekLeft + US(20)) seekRight = seekLeft + US(20);
 
-        // Track vertical center: leave a full pad of clearance below so it isn't
-        // flush against the bottom edge, while staying clear of the artist text.
-        int tr = S(5);                                  // thumb radius
-        int trackY = H - kPad() - tr;                   // padded above the bottom
+        int tr = US(5);                                 // thumb radius
+        int trackY = botMid;                            // centered in bottom band
         g_rcSeek = { seekLeft, trackY - tr, seekRight, trackY + tr };
 
-        int gh = S(3);                                  // groove thickness, scaled
+        int gh = US(3);                                 // groove thickness
         SolidBrush groove(theme().groove);
         SolidBrush accent(theme().accent);
         g.FillRectangle(&groove, seekLeft, trackY - gh / 2, seekRight - seekLeft, gh);
         int fillW = (int)((seekRight - seekLeft) * frac);
         g.FillRectangle(&accent, seekLeft, trackY - gh / 2, fillW, gh);
 
-        // thumb (scaled with DPI)
+        // thumb
         SolidBrush thumb(theme().thumb);
         int thumbX = seekLeft + fillW;
         g.FillEllipse(&thumb, thumbX - tr, trackY - tr, tr * 2, tr * 2);
 
-        // time text — vertically centered on the track
-        SolidBrush cTime(theme().title);   // same color as title/artist
-        RectF timeRect((REAL)(seekRight + kPad()), (REAL)(trackY - S(8)),
-                       (REAL)(timeW + kPad()), (REAL)S(16));
-        g.DrawString(t.c_str(), -1, &fTime, timeRect, &sf, &cTime);
+        // time text - right-aligned to the volume bar's right edge, centered on
+        // the seek track vertically.
+        SolidBrush cTime(theme().title);
+        StringFormat sfTime;
+        sfTime.SetAlignment(StringAlignmentFar);
+        sfTime.SetTrimming(StringTrimmingNone);
+        sfTime.SetFormatFlags(StringFormatFlagsNoWrap);
+        int timeH = (int)(USf(szTime * 1.3f) + 0.5);
+        RectF timeRect((REAL)(seekRight + kPad()), (REAL)(trackY - timeH / 2),
+                       (REAL)(W - kPad() - (seekRight + kPad())), (REAL)timeH);
+        g.DrawString(t.c_str(), -1, &fTime, timeRect, &sfTime, &cTime);
     }
 
-    BitBlt(hdc, 0, 0, W, H, mem, 0, 0, SRCCOPY);
+    // GDI+ text/vector antialiasing writes color but leaves some edge pixels
+    // with a too-low alpha. On a layered window those show as a dark halo around
+    // the text once the background is translucent. Fix it up: ensure no pixel is
+    // MORE transparent than the background. We raise alpha (and the premultiplied
+    // RGB proportionally so the visible color is preserved) up to bgA. Content
+    // areas (already alpha 255) are untouched.
+    g.Flush(FlushIntentionSync);
+    if (bits && bgA < 255) {
+        BYTE* px = (BYTE*)bits;            // BGRA, premultiplied, top-down
+        int count = W * H;
+        for (int i = 0; i < count; i++, px += 4) {
+            BYTE a = px[3];
+            if (a < bgA) {
+                // Raise alpha to bgA. Rescale premultiplied BGR by bgA/a so the
+                // un-premultiplied color stays the same (avoids darkening edges).
+                if (a == 0) {
+                    // Fully transparent: this is true background gap - set to the
+                    // background color at bgA (premultiplied).
+                    px[0] = (BYTE)(base.GetB() * bgA / 255);
+                    px[1] = (BYTE)(base.GetG() * bgA / 255);
+                    px[2] = (BYTE)(base.GetR() * bgA / 255);
+                } else {
+                    px[0] = (BYTE)min(255, px[0] * bgA / a);
+                    px[1] = (BYTE)min(255, px[1] * bgA / a);
+                    px[2] = (BYTE)min(255, px[2] * bgA / a);
+                }
+                px[3] = (BYTE)bgA;
+            }
+        }
+    }
+
+    // Push the ARGB bitmap to the layered strip window.
+    POINT ptSrc{ 0, 0 };
+    SIZE  sz{ W, H };
+    POINT ptDst{ rc.left, rc.top };
+    BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    UpdateLayeredWindow(hwnd, screen, &ptDst, &sz, mem, &ptSrc, 0, &bf, ULW_ALPHA);
 
     SelectObject(mem, old);
-    DeleteObject(bmp);
+    DeleteObject(dib);
     DeleteDC(mem);
-    EndPaint(hwnd, &ps);
+    ReleaseDC(nullptr, screen);
 }
 
 // ----------------------------------------------------------------------------
@@ -494,6 +743,8 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_TIMER: {
         auto& st = strip_get_state();
+        bool needsRepaintOut = false;
+        {
         std::lock_guard<std::mutex> guard(st.lock);
         ULONGLONG now = GetTickCount64();
 
@@ -508,24 +759,24 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 ShowWindow(hwnd, SW_HIDE);
             } else if (!fs && g_hiddenForFullscreen) {
                 g_hiddenForFullscreen = false;
-                ShowWindow(hwnd, SW_SHOWNA); // show without activating
+                if (!g_hiddenByUser) ShowWindow(hwnd, SW_SHOWNA); // unless user-hidden
             }
         }
 
         // Re-assert topmost z-order frequently (every ~200ms, separate from the
         // 1s fullscreen check). A one-time WS_EX_TOPMOST isn't enough to stay
-        // above the taskbar — when the strip sits ON the taskbar and you open
+        // above the taskbar - when the strip sits ON the taskbar and you open
         // Start, click a taskbar item, or switch monitors, the taskbar raises
         // above the strip. Frequent re-assertion pulls it back promptly. This is
         // the ceiling for a normal window; we can't permanently beat the taskbar,
         // but ~5x/sec keeps it visible in practice.
         static ULONGLONG s_lastTop = 0;
-        if (!g_hiddenForFullscreen && now - s_lastTop >= 200) {
+        if (!g_hiddenForFullscreen && !g_hiddenByUser && now - s_lastTop >= 200) {
             s_lastTop = now;
             SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
-        if (g_hiddenForFullscreen) return 0; // nothing to draw while hidden
+        if (g_hiddenForFullscreen || g_hiddenByUser) return 0; // nothing to draw while hidden
 
         // (2) While a seek is pending, keep showing the target until foobar's
         // reported position reaches it (within ~0.6s), then resume normal flow.
@@ -567,7 +818,7 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         // (4) Continuous marquee: advance the offset at a constant rate after a
         // short initial pause. paint() wraps it with fmod over (title+gap), so
-        // motion is endless and seamless — no slide-back.
+        // motion is endless and seamless - no slide-back.
         bool marqueeActive = (g_title_width > g_title_avail && g_title_avail > 0);
         if (marqueeActive) {
             if (g_marquee_last_ms == 0) {
@@ -589,7 +840,7 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_marquee_phase_ms = 0.0;
         }
 
-        // Only repaint when something is actually animating — AND not while a
+        // Only repaint when something is actually animating - AND not while a
         // window move/size loop is active anywhere, so the strip doesn't steal
         // UI-thread time and make dragging (foobar or the strip) choppy.
         bool needsRepaint = !g_moveLoopActive && (
@@ -601,8 +852,38 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_pressed_btn != 0 ||            // button pressed
             g_hover_btn != 0);               // button hovered
 
-        if (needsRepaint)
-            InvalidateRect(hwnd, nullptr, FALSE);
+        // Layered windows don't reliably receive WM_PAINT, so repaint by calling
+        // paint() directly rather than InvalidateRect (which only schedules a
+        // WM_PAINT that may never arrive). paint() locks st.lock itself, so we
+        // must release THIS lock first (scope ends here) to avoid self-deadlock.
+        needsRepaintOut = needsRepaint;
+        } // release st.lock before painting
+
+        if (needsRepaintOut)
+            paint(hwnd);
+        return 0;
+    }
+
+    case WM_LBUTTONDBLCLK: {
+        // Double-click the album art -> bring foobar's main window to the front
+        // (a common, intuitive shortcut). Elsewhere on the strip, double-click
+        // does nothing special (the first click already did its action).
+        int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+        if (pt_in(g_rcArt, x, y)) {
+            HWND fb = core_api::get_main_window();
+            if (fb) {
+                // The strip is a non-activating tool window, so force foobar
+                // forward via the AttachThreadInput trick (same as the prefs
+                // foreground fix). Also un-minimize if needed.
+                if (IsIconic(fb)) ShowWindow(fb, SW_RESTORE);
+                HWND fg = GetForegroundWindow();
+                DWORD fgT = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
+                DWORD myT = GetCurrentThreadId();
+                if (fgT && fgT != myT) AttachThreadInput(myT, fgT, TRUE);
+                SetForegroundWindow(fb);
+                if (fgT && fgT != myT) AttachThreadInput(myT, fgT, FALSE);
+            }
+        }
         return 0;
     }
 
@@ -629,6 +910,10 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             else if (pt_in(g_rcPlay, x, y)) g_pressed_btn = 2;
             else g_pressed_btn = 3;
             InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (pt_in(g_rcArt, x, y)) {
+            // Album art: reserved for hover-popup and double-click (open foobar).
+            // Don't start a window drag here, or the modal drag loop would
+            // swallow the double-click. The rest of the strip body still drags.
         } else {
             // Drag the window using the OS's native move loop (smooth, compositor
             // -backed) instead of hand-rolling it with SetWindowPos. We release
@@ -662,9 +947,9 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
 
-            // Album-art hover → show/hide the enlarged popup.
+            // Album-art hover -> show/hide the enlarged popup.
             bool overArt = pt_in(g_rcArt, x, y);
-            // Only pop the enlarged view if there's actually album art to show —
+            // Only pop the enlarged view if there's actually album art to show -
             // otherwise hovering an empty placeholder showed a blank square.
             bool haveArt;
             { auto& st = strip_get_state();
@@ -747,16 +1032,13 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_RBUTTONUP:
-        // Toggle light/dark. Repaint strip + popup, and persist the choice.
-        g_darkMode = !g_darkMode;
-        InvalidateRect(hwnd, nullptr, FALSE);
-        if (g_artPopup && IsWindowVisible(g_artPopup))
-            InvalidateRect(g_artPopup, nullptr, FALSE);
-        strip_save_dark_mode(g_darkMode); // persist via foobar cfg
+        // Open foobar's Preferences dialog at our page. (Theme is now a setting
+        // inside that page rather than a right-click toggle.)
+        strip_open_preferences();
         return 0;
 
     case WM_WINDOWPOSCHANGING: {
-        // Edge snapping — only while SHIFT is held. By default the strip moves
+        // Edge snapping - only while SHIFT is held. By default the strip moves
         // freely; hold Shift during a drag to snap flush to a monitor edge.
         WINDOWPOS* wp2 = (WINDOWPOS*)lp;
         if (!(wp2->flags & SWP_NOMOVE) && (GetKeyState(VK_SHIFT) & 0x8000)) {
@@ -780,9 +1062,26 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ERASEBKGND:
         return 1; // we fully paint in WM_PAINT (double-buffered)
 
-    case WM_PAINT:
-        paint(hwnd);
+    case WM_DPICHANGED: {
+        // Fired when the strip is dragged to a monitor with a different scale.
+        // wParam high word = new DPI. Update g_scale and resize to match so the
+        // strip stays the right physical size (text/buttons scale correctly).
+        UINT newDpi = HIWORD(wp);
+        if (set_scale_from_dpi(newDpi)) {
+            SetWindowPos(hwnd, nullptr, 0, 0, kWidth(), kHeight(),
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            paint(hwnd);
+        }
         return 0;
+    }
+
+    case WM_PAINT: {
+        // paint() renders via UpdateLayeredWindow (no BeginPaint/EndPaint), so we
+        // must validate the update region here or WM_PAINT would loop forever.
+        paint(hwnd);
+        ValidateRect(hwnd, nullptr);
+        return 0;
+    }
 
     case WM_DESTROY:
         if (g_timer) { KillTimer(hwnd, g_timer); g_timer = 0; }
@@ -793,42 +1092,80 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 // ----------------------------------------------------------------------------
 // Album-art enlarge popup
+// Render the popup into a 32-bit premultiplied-ARGB DIB and push it to the
+// layered window via UpdateLayeredWindow. The padding/backdrop is drawn at the
+// configured alpha (see-through over the desktop); the album art is drawn fully
+// opaque inset inside it. This is the per-pixel-alpha pipeline (distinct from
+// the opaque BitBlt path the strip still uses).
+void paint_art_popup_layered() {
+    if (!g_artPopup) return;
+    RECT rc; GetWindowRect(g_artPopup, &rc);
+    int W = rc.right - rc.left, H = rc.bottom - rc.top;
+    if (W <= 0 || H <= 0) return;
+
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+
+    // 32-bit top-down DIB section we can both GDI+ draw into and hand to
+    // UpdateLayeredWindow. Negative height = top-down so orientation matches.
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = W;
+    bi.bmiHeader.biHeight = -H;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP dib = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HBITMAP oldBmp = (HBITMAP)SelectObject(mem, dib);
+
+    {
+        // Draw through a GDI+ Bitmap wrapping the DIB as premultiplied ARGB so
+        // alpha compositing is correct (see the strip paint for the rationale).
+        Bitmap layerBmp(W, H, W * 4, PixelFormat32bppPARGB, (BYTE*)bits);
+        Graphics g(&layerBmp);
+        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        g.SetCompositingMode(CompositingModeSourceOver);
+        g.Clear(Color(0, 0, 0, 0));   // fully transparent base
+
+        int inset = S(6);
+        int alpha = strip_load_popup_alpha();
+        Color pc = theme().popupBg;
+        // Backdrop at configured alpha (GDI+ premultiplies into PARGB for us).
+        SolidBrush bg(Color((BYTE)alpha, pc.GetR(), pc.GetG(), pc.GetB()));
+        g.FillRectangle(&bg, 0, 0, W, H);
+
+        auto& st = strip_get_state();
+        std::lock_guard<std::mutex> guard(st.lock);
+        if (st.art) {
+            g.DrawImage(st.art, inset, inset, W - inset * 2, H - inset * 2);
+        } else {
+            Color ph = theme().artPh;  // placeholder is opaque
+            SolidBrush phb(Color(255, ph.GetR(), ph.GetG(), ph.GetB()));
+            g.FillRectangle(&phb, inset, inset, W - inset * 2, H - inset * 2);
+        }
+    }
+
+    // Push the ARGB bitmap to the layered window.
+    POINT ptSrc{ 0, 0 };
+    SIZE  sz{ W, H };
+    POINT ptDst{ rc.left, rc.top };
+    BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    UpdateLayeredWindow(g_artPopup, screen, &ptDst, &sz, mem, &ptSrc,
+                        0, &bf, ULW_ALPHA);
+
+    SelectObject(mem, oldBmp);
+    DeleteObject(dib);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+}
+
 // ----------------------------------------------------------------------------
 LRESULT CALLBACK ArtPopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    // Layered window: all rendering goes through paint_art_popup_layered via
+    // UpdateLayeredWindow, so we just validate on WM_PAINT.
     if (msg == WM_PAINT) {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
-        RECT rc; GetClientRect(hwnd, &rc);
-        int W = rc.right, H = rc.bottom;
-
-        HDC mem = CreateCompatibleDC(hdc);
-        HBITMAP bmp = CreateCompatibleBitmap(hdc, W, H);
-        HBITMAP old = (HBITMAP)SelectObject(mem, bmp);
-
-        Graphics g(mem);
-        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-
-        // Backdrop fills the popup; the art sits inset inside it so the backdrop
-        // shows as a padded frame around the cover (the original look).
-        int inset = S(6);
-        SolidBrush bg(theme().popupBg);
-        g.FillRectangle(&bg, 0, 0, W, H);
-        {
-            auto& st = strip_get_state();
-            std::lock_guard<std::mutex> guard(st.lock);
-            if (st.art) {
-                g.DrawImage(st.art, inset, inset, W - inset * 2, H - inset * 2);
-            } else {
-                SolidBrush ph(theme().artPh);
-                g.FillRectangle(&ph, inset, inset, W - inset * 2, H - inset * 2);
-            }
-        }
-
-        BitBlt(hdc, 0, 0, W, H, mem, 0, 0, SRCCOPY);
-        SelectObject(mem, old);
-        DeleteObject(bmp);
-        DeleteDC(mem);
-        EndPaint(hwnd, &ps);
+        PAINTSTRUCT ps; BeginPaint(hwnd, &ps); EndPaint(hwnd, &ps);
         return 0;
     }
     if (msg == WM_ERASEBKGND) return 1;
@@ -846,7 +1183,7 @@ void ensure_art_popup_created() {
     RegisterClassEx(&wc);
 
     g_artPopup = CreateWindowEx(
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED,
         kPopupClass, L"", WS_POPUP,
         0, 0, kPopupSize(), kPopupSize(),
         nullptr, nullptr, hInst, nullptr);
@@ -856,24 +1193,28 @@ void show_art_popup() {
     ensure_art_popup_created();
     if (!g_artPopup || !g_hwnd) return;
 
-    // Center the enlarged cover horizontally over the strip so their edges
-    // line up cleanly (strip and popup are the same width).
+    // Center the enlarged cover horizontally over the strip.
     RECT sr; GetWindowRect(g_hwnd, &sr);
     int stripW = sr.right - sr.left;
-    int x = sr.left + (stripW - kPopupSize()) / 2;
-    int yAbove = sr.top - kPopupSize() - 6;
+    int psize = kPopupSize();
+    int x = sr.left + (stripW - psize) / 2;
+    int yAbove = sr.top - psize - 6;
     int yBelow = sr.bottom + 6;
 
-    // Clamp only if it would actually leave the screen work area.
+    // Clamp horizontally to the work area.
     RECT wa{}; SystemParametersInfo(SPI_GETWORKAREA, 0, &wa, 0);
-    if (x + kPopupSize() > wa.right) x = wa.right - kPopupSize();
+    if (x + psize > wa.right) x = wa.right - psize;
     if (x < wa.left) x = wa.left;
 
-    int y = (yAbove >= wa.top) ? yAbove : yBelow; // prefer above, else below
+    // Prefer above the strip; fall back to below. If neither fits (very large
+    // popup on a short screen), clamp to the work area top.
+    int y = (yAbove >= wa.top) ? yAbove : yBelow;
+    if (y + psize > wa.bottom) y = wa.bottom - psize;
+    if (y < wa.top) y = wa.top;
 
-    SetWindowPos(g_artPopup, HWND_TOPMOST, x, y, kPopupSize(), kPopupSize(),
+    SetWindowPos(g_artPopup, HWND_TOPMOST, x, y, psize, psize,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    InvalidateRect(g_artPopup, nullptr, FALSE);
+    paint_art_popup_layered();   // render ARGB content to the layered window
 }
 
 void hide_art_popup() {
@@ -899,7 +1240,7 @@ static void CALLBACK MoveSizeEventProc(HWINEVENTHOOK, DWORD event, HWND,
         }
     }
     else if (event == EVENT_SYSTEM_FOREGROUND) {
-        // Another window came to the foreground — clicked Start, a taskbar item,
+        // Another window came to the foreground - clicked Start, a taskbar item,
         // closed a window, switched apps. Re-evaluate hide state IMMEDIATELY so
         // the strip shows/hides without waiting up to a second for the timer
         // (this is why closing the Start menu used to leave it hidden until the
@@ -911,9 +1252,9 @@ static void CALLBACK MoveSizeEventProc(HWINEVENTHOOK, DWORD event, HWND,
                 ShowWindow(g_hwnd, SW_HIDE);
             } else if (!fs && g_hiddenForFullscreen) {
                 g_hiddenForFullscreen = false;
-                ShowWindow(g_hwnd, SW_SHOWNA);
+                if (!g_hiddenByUser) ShowWindow(g_hwnd, SW_SHOWNA);
             }
-            if (!g_hiddenForFullscreen) {
+            if (!g_hiddenForFullscreen && !g_hiddenByUser) {
                 SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                              SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             }
@@ -925,21 +1266,30 @@ static void CALLBACK MoveSizeEventProc(HWINEVENTHOOK, DWORD event, HWND,
 // Public entry points called from foo_strip.cpp
 // ----------------------------------------------------------------------------
 void strip_create_window() {
-    g_darkMode = strip_load_dark_mode(); // restore persisted theme
+    // Theme is resolved live via theme()/strip_load_theme_mode(); no per-window
+    // theme state to restore here anymore.
 
-    // Determine DPI scale so the strip renders at a sensible physical size on
-    // high-DPI displays instead of tiny. We read the DPI for the monitor where
-    // the strip will appear. GetDpiForSystem is available on Win10+; fall back
-    // to the desktop DC if absent. 96 DPI == 100% == scale 1.0.
-    UINT dpi = 96;
-    HDC screen = GetDC(nullptr);
-    if (screen) {
-        int d = GetDeviceCaps(screen, LOGPIXELSX);
-        if (d > 0) dpi = (UINT)d;
-        ReleaseDC(nullptr, screen);
+    // Determine DPI scale so the strip renders at the right physical size on
+    // high-DPI monitors. foobar v2 is per-monitor DPI-aware, so we must query the
+    // ACTUAL monitor DPI (not GetDeviceCaps on the desktop DC, which returns 96
+    // under per-monitor awareness). Before the window exists we use the DPI of
+    // the monitor at the strip's saved/most-likely position; after creation we
+    // re-confirm with GetDpiForWindow and resize if needed.
+    {
+        POINT probe;
+        int sx, sy;
+        if (strip_load_position(sx, sy)) { probe.x = sx; probe.y = sy; }
+        else {
+            RECT wa{}; SystemParametersInfo(SPI_GETWORKAREA, 0, &wa, 0);
+            probe.x = wa.right - 100; probe.y = wa.bottom - 30;
+        }
+        UINT dpi = dpi_for_point(probe);
+        if (!dpi) {   // fallback for old Windows: desktop DC
+            HDC screen = GetDC(nullptr);
+            if (screen) { int d = GetDeviceCaps(screen, LOGPIXELSX); if (d > 0) dpi = (UINT)d; ReleaseDC(nullptr, screen); }
+        }
+        set_scale_from_dpi(dpi);
     }
-    g_scale = (double)dpi / 96.0;
-    if (g_scale < 1.0) g_scale = 1.0; // never shrink below the base design size
 
     GdiplusStartupInput gdiIn;
     GdiplusStartup(&g_gdiplusToken, &gdiIn, nullptr);
@@ -947,6 +1297,7 @@ void strip_create_window() {
     HINSTANCE hInst = core_api::get_my_instance();
 
     WNDCLASSEX wc = { sizeof(wc) };
+    wc.style = CS_DBLCLKS;          // enable WM_LBUTTONDBLCLK (art double-click)
     wc.lpfnWndProc = StripProc;
     wc.hInstance = hInst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
@@ -954,7 +1305,7 @@ void strip_create_window() {
     RegisterClassEx(&wc);
 
     // Tool window (off taskbar/alt-tab) + topmost + no activate (don't steal focus).
-    DWORD exStyle = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
+    DWORD exStyle = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED;
     DWORD style = WS_POPUP | WS_VISIBLE;
 
     // Position: restore the last-dragged spot if we have one, else default to
@@ -984,7 +1335,23 @@ void strip_create_window() {
                             x, y, kWidth(), kHeight(),
                             nullptr, nullptr, hInst, nullptr);
 
-    // ~60fps repaint (16ms) — matches common monitor refresh, smooth for the
+    // Now that the window exists, get its TRUE DPI (per-monitor) and, if it
+    // differs from the pre-creation estimate, rescale the window to match.
+    if (g_hwnd) {
+        UINT realDpi = dpi_for_window(g_hwnd);
+        if (realDpi && set_scale_from_dpi(realDpi)) {
+            SetWindowPos(g_hwnd, nullptr, 0, 0, kWidth(), kHeight(),
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+
+    // A layered window is invisible until its first UpdateLayeredWindow. Render
+    // once right now so the strip appears immediately and deterministically,
+    // rather than waiting (and racing) on the first timer tick / WM_PAINT - which
+    // layered windows don't reliably receive.
+    if (g_hwnd) paint(g_hwnd);
+
+    // ~60fps repaint (16ms) - matches common monitor refresh, smooth for the
     // marquee + scrubber, and reliably delivered by the standard timer. Combined
     // with the conditional repaint below, idle cost stays near zero.
     g_timer = SetTimer(g_hwnd, 1, 16, nullptr);
@@ -996,6 +1363,28 @@ void strip_create_window() {
         EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MOVESIZEEND,
         nullptr, MoveSizeEventProc, 0, 0,
         WINEVENT_OUTOFCONTEXT);
+
+    // Honor the persisted master visibility: if the user left it hidden, start
+    // hidden (the create style includes WS_VISIBLE, so we explicitly hide here).
+    g_hiddenByUser = !strip_load_show_strip();
+    if (g_hiddenByUser && g_hwnd) ShowWindow(g_hwnd, SW_HIDE);
+}
+
+// Apply the master "Show strip" setting: hide or show the whole window. Called
+// from the prefs page when the checkbox changes. Re-shows need a fresh paint
+// (layered windows show nothing until UpdateLayeredWindow) and topmost re-assert.
+void strip_apply_visibility() {
+    if (!g_hwnd) return;
+    bool show = strip_load_show_strip();
+    g_hiddenByUser = !show;
+    if (show) {
+        ShowWindow(g_hwnd, SW_SHOWNA);
+        SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        paint(g_hwnd);   // render immediately (layered)
+    } else {
+        ShowWindow(g_hwnd, SW_HIDE);
+    }
 }
 
 void strip_destroy_window() {
@@ -1022,7 +1411,24 @@ void strip_destroy_window() {
 void strip_notify_repaint() {
     if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
     if (g_artPopup && IsWindowVisible(g_artPopup))
-        InvalidateRect(g_artPopup, nullptr, FALSE); // refresh enlarged cover too
+        paint_art_popup_layered(); // re-render enlarged cover (layered)
+}
+
+// Re-read settings from config and apply them to the live window. Called by the
+// preferences page when the user clicks Apply/OK. For now this resizes the strip
+// to the configured width (height unchanged) and repaints. Later milestones will
+// extend it to re-create fonts, recolor, etc.
+void strip_apply_settings() {
+    if (!g_hwnd) return;
+    // kWidth()/kHeight() reflect the new configured dimensions automatically.
+    // Resize the window to both, keeping its current top-left position.
+    RECT wr;
+    if (!GetWindowRect(g_hwnd, &wr)) return;
+    SetWindowPos(g_hwnd, nullptr, 0, 0, kWidth(), kHeight(),
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+    if (g_artPopup && IsWindowVisible(g_artPopup))
+        paint_art_popup_layered();  // live popup color/alpha update (layered)
 }
 
 void strip_reset_interp() {
@@ -1037,7 +1443,7 @@ void strip_reset_interp() {
 void strip_sync_interp(double position) {
     // Called on each per-second position update from foobar. Re-anchor the
     // baseline timestamp to "now" so the timer's dt measures only the gap since
-    // THIS reading — otherwise position (jumping each second) and dt (growing)
+    // THIS reading - otherwise position (jumping each second) and dt (growing)
     // stack and the clock runs at ~2x.
     // While a seek is pending we're deliberately holding the target position, so
     // only update the timestamp, not the displayed value.
