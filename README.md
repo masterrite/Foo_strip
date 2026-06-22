@@ -26,8 +26,11 @@ This is a personal project to solve the problem that Windows 11 doesn't allow ta
 - Previous / play-pause / next with hover + press feedback
 - Seek bar with click/drag scrubbing, accurate time readout
 - Hides automatically when a fullscreen game/video is in front
-- Right-click anywhere in the strip to toggle between light and dark mode
-  - Carries over on restart
+- Right-click in the strip to open customization settings
+  - change basically everything but the album art thumbnail
+- Double-click album art to bring up foobar window
+- "Toggle floating strip" under View menu and bindable to a button in Column UI
+
 
 ## Install
 
