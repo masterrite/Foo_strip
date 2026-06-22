@@ -872,16 +872,23 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (pt_in(g_rcArt, x, y)) {
             HWND fb = core_api::get_main_window();
             if (fb) {
-                // The strip is a non-activating tool window, so force foobar
-                // forward via the AttachThreadInput trick (same as the prefs
-                // foreground fix). Also un-minimize if needed.
-                if (IsIconic(fb)) ShowWindow(fb, SW_RESTORE);
-                HWND fg = GetForegroundWindow();
-                DWORD fgT = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
+                // Restore-then-raise foobar's main window, reliably even from
+                // minimized. The order matters: we AttachThreadInput to foobar's
+                // OWN thread FIRST, then do the restore + raise INSIDE the attach.
+                // While attached, our show/activate calls behave as if issued by
+                // foobar's own thread, so the foreground lock doesn't block them
+                // and the restore's activation isn't lost to a race. Detaching
+                // last keeps the whole sequence as one atomic operation.
+                DWORD fbT = GetWindowThreadProcessId(fb, nullptr);
                 DWORD myT = GetCurrentThreadId();
-                if (fgT && fgT != myT) AttachThreadInput(myT, fgT, TRUE);
-                SetForegroundWindow(fb);
-                if (fgT && fgT != myT) AttachThreadInput(myT, fgT, FALSE);
+                bool attached = (fbT && fbT != myT && AttachThreadInput(myT, fbT, TRUE));
+
+                if (IsIconic(fb)) ShowWindow(fb, SW_RESTORE);   // 1. un-minimize
+                SetForegroundWindow(fb);                        // 2. raise + focus
+                BringWindowToTop(fb);
+                SetActiveWindow(fb);
+
+                if (attached) AttachThreadInput(myT, fbT, FALSE);
             }
         }
         return 0;
