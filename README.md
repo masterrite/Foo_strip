@@ -5,10 +5,10 @@
 <img width="300" height="352" alt="image" src="https://github.com/user-attachments/assets/a4e22952-a722-4bb3-9c9e-dd47abdb5d5a" />
 </p>
 
-A standalone, draggable, always-on-top **playback strip** for foobar2000 on
+A standalone, draggable, always-on-top playback strip for foobar2000 on
 Windows, inspired by Deskband Controls. Album art, scrolling title/artist, transport controls, and a working
 seek bar — floating over your desktop, independent of foobar's own window. Reads position/length and seeks **directly**
-through foobar's `playback_control` (no SMTC, no bridge).
+through foobar's `playback_control` (no SMTC or bridge).
 
 This is a personal project to solve the problem that Windows 11 doesn't allow taskbar plugins anymore, which means Deskband Controls is no longer available. Since nobody seems to be interested in picking up where Eldarien left off, I asked Claude, Opus 4.8, to build me this for personal use. PRs welcome, especially for build/optimization improvements.
 
@@ -31,6 +31,13 @@ This is a personal project to solve the problem that Windows 11 doesn't allow ta
 - Double-click album art to bring up foobar window
 - "Toggle floating strip" under View menu and bindable to a button in Column UI
 
+## Caveat
+
+The component will run an aggressive timer to reassert itself onto the topmost z-order to stay on top of the taskbar. But if you open start menu by clicking the start button, it will go behind the taskbar, because start menu (and the taskbar in tow) is always given the top-most z-order. Closing the menu by clicking elsewhere will bring up the strip, but closing the menu by clicking the start button again won't. In the latter case, just click the desktop or another window again. I think this is the best we can do.
+
+## Won't fix
+
+Width of the padding around album art pop-up is not customizable. I like the look of it. Its transparency is, however, and the pop-up size.
 
 ## Install
 
@@ -63,6 +70,14 @@ build.bat all
 
 The script cleans stale artifacts, builds the three SDK libs, then the
 component. Output: `bin\<Platform>\Release\foo_strip.dll`, and a bundled foo_strip.fb2k-component in the root folder (where the bat file is) for easy install.
+
+If you want to print the build log:
+
+```
+build.bat all > log.txt
+```
+
+Or easier still: double-click the build.bat
  
 ### Manual
 
