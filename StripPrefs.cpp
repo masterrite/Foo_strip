@@ -1024,8 +1024,7 @@ private:
     int m_tabContentH[3] = {0, 0, 0};       // total content height per tab (scroll)
     int m_curTab = 0;                        // currently shown tab
     int m_scrollY = 0;                       // current vertical scroll offset
-    double m_dpiScale = 1.0;                  // page DPI scale (1.0 at 96 DPI)
-    double m_uiScale = 1.0;                    // layout scale from font height
+    double m_uiScale = 1.0;                    // layout scale (DPI), 1.0 at 96 DPI
     HWND m_lastSpin = nullptr;              // last spinner created by makeEdit
     HFONT m_boldFont = nullptr;             // bold font for section headings
     HFONT m_bodyFont = nullptr;             // dialog font (borrowed from parent)

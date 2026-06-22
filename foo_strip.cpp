@@ -1,7 +1,7 @@
 // foo_strip.cpp
 // A standalone floating playback strip for foobar2000, rendered with GDI+.
 // Because this runs in-process, it reads position/length and seeks DIRECTLY
-// through playback_control — no SMTC, no bridge, no second component.
+// through playback_control - no SMTC, no bridge, no second component.
 //
 // Architecture:
 //   - initquit service: creates/destroys the floating top-level window in step
@@ -39,7 +39,7 @@ DECLARE_COMPONENT_VERSION(
     "seek bar. Reads playback directly in-process.\n");
 
 // The packaged component contains foo_strip.dll (32-bit, at the archive root)
-// and x64\foo_strip.dll (64-bit, in the x64 subfolder) — both named the same,
+// and x64\foo_strip.dll (64-bit, in the x64 subfolder) - both named the same,
 // per foobar's packaging convention. So a single filename validates both.
 VALIDATE_COMPONENT_FILENAME("foo_strip.dll");
 
@@ -102,7 +102,7 @@ void refresh_from_core() {
     // Map foobar's dB volume to a 0..1 slider position. Volume in dB is
     // logarithmic, so sliderPos = 10^(dB/coeff). The coefficient 34 is taken
     // from Eldarien's DeskbandControls (GPL-3.0), whose author tuned it to
-    // "match best with foobar2000 volume control behaviour" — it makes this
+    // "match best with foobar2000 volume control behaviour" - it makes this
     // slider track foobar's own native volume slider.
     //   Source: https://github.com/Eldarien/DeskbandControls
     //   (dcmFoobar2000/Code/Controller.cs, _volumeDbCoeff)
@@ -125,7 +125,7 @@ void refresh_from_core() {
 namespace {
 
 // ----------------------------------------------------------------------------
-// play_callback_static — playback events, always on the main thread.
+// play_callback_static - playback events, always on the main thread.
 // ----------------------------------------------------------------------------
 class strip_play_callback : public play_callback_static {
 public:
@@ -254,7 +254,7 @@ void strip_play_callback::load_album_art() {
             }
         }
     } catch (...) {
-        // No art / extraction failed — leave null, window draws a placeholder.
+        // No art / extraction failed - leave null, window draws a placeholder.
     }
 
     std::lock_guard<std::mutex> guard(g_state.lock);
@@ -269,7 +269,7 @@ static play_callback_static_factory_t<strip_play_callback> g_play_cb_factory;
 static void strip_anchor_factories();
 
 // ----------------------------------------------------------------------------
-// initquit — create the floating window once foobar's main window exists.
+// initquit - create the floating window once foobar's main window exists.
 // ----------------------------------------------------------------------------
 class strip_initquit : public initquit {
 public:
@@ -366,7 +366,7 @@ void strip_toggle_mute() {
 // ----------------------------------------------------------------------------
 // Theme persistence via foobar's config system. cfg_bool saves to foobar's
 // configuration automatically and restores on startup. The GUID is a unique
-// identifier for this setting — generate your own if you fork this.
+// identifier for this setting - generate your own if you fork this.
 // ----------------------------------------------------------------------------
 static cfg_bool g_cfg_dark_mode(
     GUID{ 0x9a3f1c20, 0x4b7e, 0x4e8a,

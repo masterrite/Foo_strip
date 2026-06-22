@@ -1,2 +1,2 @@
-// stdafx.cpp — builds the precompiled header.
+// stdafx.cpp - builds the precompiled header.
 #include "stdafx.h"

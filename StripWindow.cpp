@@ -38,11 +38,13 @@ const int kBaseSeekH  = 10;   // seek row height
 double g_scale = 1.0;
 
 // --- Proper DPI detection -------------------------------------------------
-// foobar2000 v2 runs per-monitor DPI-aware, so the OLD approach of reading
-// GetDeviceCaps(GetDC(nullptr)) returns 96 regardless of the actual monitor
-// scaling - the strip then never grows (or gets bitmap-stretched and blurry).
-// These helpers query the REAL per-window / per-monitor DPI via the modern
-// APIs, loaded dynamically so the component still loads on older Windows.
+// We need the REAL DPI of the monitor the strip is on. The naive approach,
+// GetDeviceCaps(GetDC(nullptr), LOGPIXELSX), is unreliable: depending on the
+// host process's DPI-awareness it can report 96 regardless of the actual
+// monitor scaling, leaving the strip un-scaled (tiny). These helpers query the
+// true per-window / per-monitor DPI via the modern APIs (GetDpiForWindow /
+// GetDpiForMonitor), loaded dynamically so the component still loads on older
+// Windows that lack them (falling back to the desktop DC there).
 static UINT dpi_for_window(HWND hwnd) {
     HMODULE u = GetModuleHandleW(L"user32.dll");
     if (u) {
@@ -1277,11 +1279,11 @@ void strip_create_window() {
     // theme state to restore here anymore.
 
     // Determine DPI scale so the strip renders at the right physical size on
-    // high-DPI monitors. foobar v2 is per-monitor DPI-aware, so we must query the
-    // ACTUAL monitor DPI (not GetDeviceCaps on the desktop DC, which returns 96
-    // under per-monitor awareness). Before the window exists we use the DPI of
-    // the monitor at the strip's saved/most-likely position; after creation we
-    // re-confirm with GetDpiForWindow and resize if needed.
+    // high-DPI monitors. We query the ACTUAL monitor DPI (not GetDeviceCaps on
+    // the desktop DC, which can report 96 depending on process DPI-awareness).
+    // Before the window exists we use the DPI of the monitor at the strip's
+    // saved/most-likely position; after creation we re-confirm with
+    // GetDpiForWindow and resize if needed.
     {
         POINT probe;
         int sx, sy;

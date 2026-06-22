@@ -1,4 +1,4 @@
-// stdafx.h — precompiled header
+// stdafx.h - precompiled header
 #pragma once
 
 // Windows
