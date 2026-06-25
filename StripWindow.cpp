@@ -240,6 +240,11 @@ const Theme& theme() {
     s_custom.accent = C(strip_load_color(3));
     s_custom.groove = C(strip_load_color(4));
     s_custom.popupBg = C(strip_load_color(5));
+    // Hover/press highlight tint: derive from the button color so it always
+    // contrasts with the user's chosen background. (Previously this kept the
+    // dark-preset's white, which was invisible on light or white custom
+    // backgrounds - the hover/press feedback "disappeared" in Custom mode.)
+    s_custom.btnHl  = C(strip_load_color(2));
     return s_custom;
 }
 
@@ -257,6 +262,7 @@ double g_title_avail = 0.0;      // available px in the title area
 
 // Geometry of interactive regions, recomputed each paint.
 RECT g_rcPrev{}, g_rcPlay{}, g_rcNext{}, g_rcSeek{};
+RECT g_rcPrevHit{}, g_rcPlayHit{}, g_rcNextHit{};  // wider pressable areas
 RECT g_rcVol{};                      // volume slider track rect (visual)
 RECT g_rcVolHit{};                   // volume slider hit-test rect (generous)
 RECT g_rcMute{};                     // speaker / mute-toggle icon rect
@@ -477,14 +483,9 @@ void paint(HWND hwnd) {
         sf.SetTrimming(StringTrimmingEllipsisCharacter);
         sf.SetFormatFlags(StringFormatFlagsNoWrap);
 
-        // (4) Title with marquee. Reset scroll when the title changes.
-        static std::wstring s_lastTitle;
-        if (title != s_lastTitle) {
-            s_lastTitle = title;
-            g_marquee_offset = 0.0;
-            g_marquee_last_ms = 0;
-            g_marquee_phase_ms = 0.0;
-        }
+        // (4) Title with marquee. The timer thread owns the marquee state and
+        // resets it on song change (see the advance block); here we only measure
+        // the current title so the timer knows whether it overflows.
         RectF measure;
         g.MeasureString(title.c_str(), -1, &fTitle, PointF(0, 0), &measure);
         g_title_width = measure.Width;
@@ -551,8 +552,32 @@ void paint(HWND hwnd) {
         g_rcPlay = { g_rcNext.left - spaceBtn - btnSize, btnTop, g_rcNext.left - spaceBtn, btnBot };
         g_rcPrev = { g_rcPlay.left - spaceBtn - btnSize, btnTop, g_rcPlay.left - spaceBtn, btnBot };
 
+        // Wider PRESSABLE areas: inflate each button's hit box horizontally by a
+        // fraction of the button size (so it scales with button size). The visual
+        // glyphs stay put; only the clickable region grows. Inner edges are
+        // clamped to the midpoint between adjacent buttons, so the hit areas meet
+        // edge-to-edge but never overlap (no ambiguous clicks) - even when the
+        // buttons are flush (spaceBtn == 0).
+        int hitPad = btnSize / 4;               // horizontal pad, scales with size
+        int vPad   = btnSize / 4 + 1;           // vertical pad, scales with size (+1px)
+        // Keep the taller hit box within the top band so it doesn't spill into the
+        // seek bar below or off the top edge.
+        int hitTop = btnTop - vPad; if (hitTop < contentTop) hitTop = contentTop;
+        int hitBot = btnBot + vPad; if (hitBot > contentTop + topRowH) hitBot = contentTop + topRowH;
+        LONG midPN = (g_rcPrev.right + g_rcPlay.left) / 2;   // prev|play boundary
+        LONG midNN = (g_rcPlay.right + g_rcNext.left) / 2;   // play|next boundary
+        LONG prevR = g_rcPrev.right + hitPad;  if (prevR > midPN) prevR = midPN;
+        LONG playL = g_rcPlay.left  - hitPad;  if (playL < midPN) playL = midPN;
+        LONG playR = g_rcPlay.right + hitPad;  if (playR > midNN) playR = midNN;
+        LONG nextL = g_rcNext.left  - hitPad;  if (nextL < midNN) nextL = midNN;
+        g_rcPrevHit = { g_rcPrev.left - hitPad, hitTop, prevR, hitBot };
+        g_rcPlayHit = { playL, hitTop, playR, hitBot };
+        g_rcNextHit = { nextL, hitTop, g_rcNext.right + hitPad, hitBot };
+
         // (1) Button feedback: hover = subtle, pressed = stronger. The highlight
-        // is inset from the rect so adjacent buttons/time text stay clear.
+        // fills the full CLICKABLE (hit) area so the feedback matches exactly what
+        // the user is pressing. A 1px inset keeps adjacent highlights from
+        // touching when buttons are flush.
         {
             auto drawBtnBg = [&](const RECT& r, int id) {
                 int alpha = 0;
@@ -561,12 +586,12 @@ void paint(HWND hwnd) {
                 if (alpha == 0) return;
                 Color t = theme().btnHl;
                 SolidBrush hl(Color(alpha, t.GetR(), t.GetG(), t.GetB()));
-                g.FillRectangle(&hl, r.left + S(2), r.top + S(2),
-                                (r.right - r.left) - S(4), (r.bottom - r.top) - S(4));
+                g.FillRectangle(&hl, r.left + S(1), r.top + S(1),
+                                (r.right - r.left) - S(2), (r.bottom - r.top) - S(2));
             };
-            drawBtnBg(g_rcPrev, 1);
-            drawBtnBg(g_rcPlay, 2);
-            drawBtnBg(g_rcNext, 3);
+            drawBtnBg(g_rcPrevHit, 1);
+            drawBtnBg(g_rcPlayHit, 2);
+            drawBtnBg(g_rcNextHit, 3);
         }
 
         // Modern outline glyphs: shapes are stroked, not filled. Stroke width
@@ -821,8 +846,25 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // (4) Continuous marquee: advance the offset at a constant rate after a
         // short initial pause. paint() wraps it with fmod over (title+gap), so
         // motion is endless and seamless - no slide-back.
+        //
+        // Song-switch handling: g_title_width is measured in paint(), so on the
+        // first tick after a new title it may still hold the OLD title's width.
+        // Advancing against that stale width causes a visible jitter right at the
+        // switch (worst on ~60Hz, where the 16ms timer beats with the refresh).
+        // So we detect the title change HERE, reset the marquee, and skip the
+        // advance for this frame - paint() will re-measure the new title before
+        // the next tick advances it.
+        static std::wstring s_marqueeTitle;
+        bool titleJustChanged = (st.title != s_marqueeTitle);
+        if (titleJustChanged) {
+            s_marqueeTitle = st.title;
+            g_marquee_offset = 0.0;
+            g_marquee_last_ms = 0;
+            g_marquee_phase_ms = 0.0;
+        }
+
         bool marqueeActive = (g_title_width > g_title_avail && g_title_avail > 0);
-        if (marqueeActive) {
+        if (marqueeActive && !titleJustChanged) {
             if (g_marquee_last_ms == 0) {
                 g_marquee_last_ms = now;
                 g_marquee_phase_ms = 0.0;
@@ -836,7 +878,7 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_marquee_phase_ms > pauseStart) {
                 g_marquee_offset += dt * speed;
             }
-        } else {
+        } else if (!marqueeActive) {
             g_marquee_offset = 0.0;
             g_marquee_last_ms = 0;
             g_marquee_phase_ms = 0.0;
@@ -913,10 +955,10 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             double f = (double)(x - g_rcVol.left) / (g_rcVol.right - g_rcVol.left);
             strip_set_volume(min(1.0, max(0.0, f))); // fires on_volume_change
             InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (pt_in(g_rcPrev, x, y) || pt_in(g_rcPlay, x, y) || pt_in(g_rcNext, x, y)) {
+        } else if (pt_in(g_rcPrevHit, x, y) || pt_in(g_rcPlayHit, x, y) || pt_in(g_rcNextHit, x, y)) {
             // Record which button is pressed for visual feedback; fired on up.
-            if (pt_in(g_rcPrev, x, y)) g_pressed_btn = 1;
-            else if (pt_in(g_rcPlay, x, y)) g_pressed_btn = 2;
+            if (pt_in(g_rcPrevHit, x, y)) g_pressed_btn = 1;
+            else if (pt_in(g_rcPlayHit, x, y)) g_pressed_btn = 2;
             else g_pressed_btn = 3;
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (pt_in(g_rcArt, x, y)) {
@@ -948,9 +990,9 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // Update hover state (skip while actively scrubbing).
         if (!g_scrubbing) {
             int h = 0;
-            if (pt_in(g_rcPrev, x, y)) h = 1;
-            else if (pt_in(g_rcPlay, x, y)) h = 2;
-            else if (pt_in(g_rcNext, x, y)) h = 3;
+            if (pt_in(g_rcPrevHit, x, y)) h = 1;
+            else if (pt_in(g_rcPlayHit, x, y)) h = 2;
+            else if (pt_in(g_rcNextHit, x, y)) h = 3;
             if (h != g_hover_btn) {
                 g_hover_btn = h;
                 InvalidateRect(hwnd, nullptr, FALSE);
@@ -1012,14 +1054,14 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else if (g_pressed_btn != 0) {
             // Transport clicks (only if mouse still over the same button).
             auto pc = playback_control::get();
-            if (g_pressed_btn == 1 && pt_in(g_rcPrev, x, y)) {
+            if (g_pressed_btn == 1 && pt_in(g_rcPrevHit, x, y)) {
                 pc->previous();
-            } else if (g_pressed_btn == 2 && pt_in(g_rcPlay, x, y)) {
+            } else if (g_pressed_btn == 2 && pt_in(g_rcPlayHit, x, y)) {
                 // (1) If stopped, start playback; otherwise toggle pause. This is
                 // why the play button did nothing before a song was started.
                 if (pc->is_playing()) pc->toggle_pause();
                 else pc->start(playback_control::track_command_play, false);
-            } else if (g_pressed_btn == 3 && pt_in(g_rcNext, x, y)) {
+            } else if (g_pressed_btn == 3 && pt_in(g_rcNextHit, x, y)) {
                 pc->next();
             }
             g_pressed_btn = 0;
