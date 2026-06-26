@@ -938,6 +938,16 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
+    case WM_MOUSEACTIVATE:
+        // The strip is a no-activate tool window. By default, when it's the
+        // inactive window, the OS can swallow the first click just to activate
+        // it - the user sees the hover overlay but the press doesn't register
+        // ("missing clicks" when working in other windows). Returning
+        // MA_NOACTIVATE tells Windows: don't activate the strip (keep focus where
+        // it is) AND deliver the click as a normal mouse message instead of
+        // eating it. So every click registers on the first try.
+        return MA_NOACTIVATE;
+
     case WM_LBUTTONDOWN: {
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
         SetCapture(hwnd);
@@ -1000,15 +1010,17 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
             // Album-art hover -> show/hide the enlarged popup.
             bool overArt = pt_in(g_rcArt, x, y);
-            // Only pop the enlarged view if there's actually album art to show -
-            // otherwise hovering an empty placeholder showed a blank square.
+            // Only pop the enlarged view if the popup is enabled AND there's
+            // actually album art to show - otherwise hovering an empty
+            // placeholder showed a blank square.
             bool haveArt;
             { auto& st = strip_get_state();
               std::lock_guard<std::mutex> g(st.lock); haveArt = (st.art != nullptr); }
-            if (overArt && haveArt && !g_artHover) {
+            bool popupEnabled = strip_load_show_popup();
+            if (overArt && haveArt && popupEnabled && !g_artHover) {
                 g_artHover = true;
                 show_art_popup();
-            } else if ((!overArt || !haveArt) && g_artHover) {
+            } else if ((!overArt || !haveArt || !popupEnabled) && g_artHover) {
                 g_artHover = false;
                 hide_art_popup();
             }

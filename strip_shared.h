@@ -46,6 +46,8 @@ int  strip_load_icon_size(int which);   // 0 transport, 1 speaker (base px)
 void strip_save_icon_size(int which, int s);
 bool strip_load_show_volume();          // show volume bar + speaker icon
 void strip_save_show_volume(bool s);
+bool strip_load_show_popup();           // show album-art hover/click popup
+void strip_save_show_popup(bool s);
 bool strip_load_show_strip();           // master strip visibility
 void strip_save_show_strip(bool s);
 void strip_apply_visibility();          // show/hide the strip per the setting

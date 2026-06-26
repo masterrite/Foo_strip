@@ -62,6 +62,7 @@ enum {
     ID_SHOW_STRIP = 1039,                     // master show/hide strip checkbox
     ID_EDIT_SB = 1035, ID_SLIDER_SB = 1036,   // spacing between buttons
     ID_EDIT_SV = 1037, ID_SLIDER_SV = 1038,   // spacing buttons-to-volume
+    ID_SHOW_POPUP = 1040,                     // show/hide album-art popup checkbox
 };
 enum { kNumColors = 6 };   // 0 bg,1 text,2 buttons,3 fill,4 track,5 popup padding
 enum { kNumFonts = 3 };    // 0 title, 1 artist, 2 time
@@ -210,10 +211,20 @@ public:
             m_savedShowVol = m_origShowVol = strip_load_show_volume();
             m_showVol = CreateWindowExW(0, L"BUTTON", L"Show volume control",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                LBL_X, y, dscale(240), dscale(22), m_content, (HMENU)(INT_PTR)ID_SHOW_VOLUME, inst, nullptr);
+                LBL_X, y, dscale(180), dscale(22), m_content, (HMENU)(INT_PTR)ID_SHOW_VOLUME, inst, nullptr);
             SendMessageW(m_showVol, BM_SETCHECK, m_savedShowVol ? BST_CHECKED : BST_UNCHECKED, 0);
             if (m_bodyFont) SendMessageW(m_showVol, WM_SETFONT, (WPARAM)m_bodyFont, TRUE);
-            track(0, m_showVol); y += SU(30);
+            track(0, m_showVol);
+
+            // Show album-art popup - shares the row with the volume toggle.
+            m_savedShowPopup = m_origShowPopup = strip_load_show_popup();
+            m_showPopup = CreateWindowExW(0, L"BUTTON", L"Show album art popup",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                LBL_X + dscale(190), y, dscale(190), dscale(22), m_content,
+                (HMENU)(INT_PTR)ID_SHOW_POPUP, inst, nullptr);
+            SendMessageW(m_showPopup, BM_SETCHECK, m_savedShowPopup ? BST_CHECKED : BST_UNCHECKED, 0);
+            if (m_bodyFont) SendMessageW(m_showPopup, WM_SETFONT, (WPARAM)m_bodyFont, TRUE);
+            track(0, m_showPopup); y += SU(30);
 
             // ---- Theme ----
             makeHeading(0, L"Theme", LBL_X, y, CW); y += HEAD;
@@ -381,6 +392,7 @@ public:
             strip_save_icon_size(0, m_origIcon[0]);
             strip_save_icon_size(1, m_origIcon[1]);
             strip_save_show_volume(m_origShowVol);
+            strip_save_show_popup(m_origShowPopup);
             strip_save_spacing(0, m_origSpace[0]);
             strip_save_spacing(1, m_origSpace[1]);
             strip_apply_settings();
@@ -408,6 +420,7 @@ public:
         if (strcmp(m_curFace.get_ptr(), m_savedFace.get_ptr()) != 0) fontsChanged = true;
         if (readEdit(ID_EDIT_IT) != m_savedIcon[0] || readEdit(ID_EDIT_IS) != m_savedIcon[1]) fontsChanged = true;
         if ((SendMessageW(m_showVol, BM_GETCHECK, 0, 0) == BST_CHECKED) != m_savedShowVol) fontsChanged = true;
+        if ((SendMessageW(m_showPopup, BM_GETCHECK, 0, 0) == BST_CHECKED) != m_savedShowPopup) fontsChanged = true;
         if ((SendMessageW(m_showStrip, BM_GETCHECK, 0, 0) == BST_CHECKED) != m_savedShowStrip) fontsChanged = true;
         if (readEdit(ID_EDIT_SB) != m_savedSpace[0] || readEdit(ID_EDIT_SV) != m_savedSpace[1]) fontsChanged = true;
         if (readEdit(ID_EDIT_W) != m_savedW || readEdit(ID_EDIT_H) != m_savedH ||
@@ -436,6 +449,8 @@ public:
         strip_save_icon_size(1, readEdit(ID_EDIT_IS));
         bool sv = SendMessageW(m_showVol, BM_GETCHECK, 0, 0) == BST_CHECKED;
         strip_save_show_volume(sv);
+        bool sp = SendMessageW(m_showPopup, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        strip_save_show_popup(sp);
         bool ss = SendMessageW(m_showStrip, BM_GETCHECK, 0, 0) == BST_CHECKED;
         strip_save_show_strip(ss);
         strip_save_spacing(0, readEdit(ID_EDIT_SB));
@@ -461,6 +476,7 @@ public:
         setBoth(ID_SLIDER_IT, ID_EDIT_IT, m_savedIcon[0]);
         setBoth(ID_SLIDER_IS, ID_EDIT_IS, m_savedIcon[1]);
         m_savedShowVol = m_origShowVol = strip_load_show_volume();
+        m_savedShowPopup = m_origShowPopup = strip_load_show_popup();
         m_savedShowStrip = m_origShowStrip = strip_load_show_strip();
         m_savedSpace[0] = m_origSpace[0] = strip_load_spacing(0);
         m_savedSpace[1] = m_origSpace[1] = strip_load_spacing(1);
@@ -905,6 +921,12 @@ private:
                 livePreview();
                 changed();
             }
+            // Show-album-art-popup toggled: save right away so the strip's hover
+            // behaviour updates live. No repaint needed (popup is hover-driven).
+            else if (id == ID_SHOW_POPUP && code == BN_CLICKED) {
+                strip_save_show_popup(SendMessageW(m_showPopup, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                changed();
+            }
             // Master show-strip toggled: persist and apply visibility right away
             // (live, like other settings). Hiding removes the window; re-showing
             // re-renders it. Cancel-restore handled in the destructor.
@@ -991,6 +1013,7 @@ private:
           if (it > 0) strip_save_icon_size(0, it);
           if (is > 0) strip_save_icon_size(1, is); }
         strip_save_show_volume(SendMessageW(m_showVol, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        strip_save_show_popup(SendMessageW(m_showPopup, BM_GETCHECK, 0, 0) == BST_CHECKED);
         { int sb = readEdit(ID_EDIT_SB), sv = readEdit(ID_EDIT_SV);
           strip_save_spacing(0, sb); strip_save_spacing(1, sv); }
         int mode = (int)SendMessageW(m_theme, CB_GETCURSEL, 0, 0);
@@ -1017,7 +1040,7 @@ private:
          m_sliderPA = nullptr, m_editPA = nullptr, m_tabs = nullptr,
          m_sliderBA = nullptr, m_editBA = nullptr,
          m_sliderIT = nullptr, m_editIT = nullptr, m_sliderIS = nullptr, m_editIS = nullptr,
-         m_showVol = nullptr,
+         m_showVol = nullptr, m_showPopup = nullptr,
          m_sliderSB = nullptr, m_editSB = nullptr, m_sliderSV = nullptr, m_editSV = nullptr,
          m_showStrip = nullptr;
     std::vector<HWND> m_tabCtrls[3];        // controls per tab (General/Size/Text)
@@ -1046,6 +1069,7 @@ private:
     pfc::string8 m_curFace, m_savedFace, m_origFace;   // font family name
     int m_savedIcon[2] = {20, 14}, m_origIcon[2] = {20, 14};  // transport / speaker
     bool m_savedShowVol = true, m_origShowVol = true;        // volume visible?
+    bool m_savedShowPopup = true, m_origShowPopup = true;    // art popup visible?
     bool m_savedShowStrip = true, m_origShowStrip = true;    // whole strip visible?
     int m_savedSpace[2] = {0, 4}, m_origSpace[2] = {0, 4};   // btn gap / volume gap
     int m_savedMode = 1, m_origMode = 1;   // theme mode baseline / original

@@ -475,6 +475,15 @@ static cfg_bool g_cfg_show_volume(
 bool strip_load_show_volume()        { return g_cfg_show_volume; }
 void strip_save_show_volume(bool s)  { g_cfg_show_volume = s; }
 
+// Show/hide the album-art hover/click popup (the large art + its padding). When
+// false, hovering/clicking the inline thumbnail does not open the popup at all.
+// Default true (shown).
+static cfg_bool g_cfg_show_popup(
+    GUID{ 0x9a3f1c31, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x5c } }, true);
+
+bool strip_load_show_popup()         { return g_cfg_show_popup; }
+void strip_save_show_popup(bool s)   { g_cfg_show_popup = s; }
+
 // Master strip visibility. When false the whole strip window is hidden; the only
 // way back is this setting (the strip isn't there to click). Persists across
 // restarts (the create path respects it). Default true (shown).
