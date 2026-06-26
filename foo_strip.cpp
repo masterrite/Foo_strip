@@ -239,18 +239,28 @@ void strip_play_callback::load_album_art() {
         auto extractor = aamv2->open(items, ids, abort);
 
         album_art_data_ptr data = extractor->query(album_art_ids::cover_front, abort);
+        bool gotReal = (data.is_valid() && data->get_size() > 0);
 
         // Radio streams and untagged files often have no embedded cover. Fall back
         // to foobar's configured stub image (Display > Album Art > Stub image) so
         // the thumbnail shows something sensible instead of a blank placeholder.
-        // The stub is served by a SEPARATE extractor obtained via open_stub(),
-        // not a method on the regular extractor.
-        if (!(data.is_valid() && data->get_size() > 0)) {
+        // The stub is served by a SEPARATE extractor obtained via open_stub().
+        if (!gotReal) {
             try {
                 auto stubEx = aamv2->open_stub(abort);
-                if (stubEx.is_valid())
+                console::formatter() << "foo_strip: open_stub valid="
+                    << (stubEx.is_valid() ? 1 : 0);
+                if (stubEx.is_valid()) {
                     data = stubEx->query(album_art_ids::cover_front, abort);
-            } catch (...) { /* no stub configured -> leave blank, handled below */ }
+                    console::formatter() << "foo_strip: stub query valid="
+                        << (data.is_valid() ? 1 : 0)
+                        << " size=" << (data.is_valid() ? (t_uint64)data->get_size() : 0);
+                }
+            } catch (std::exception const & e) {
+                console::formatter() << "foo_strip: stub query threw: " << e.what();
+            } catch (...) {
+                console::formatter() << "foo_strip: stub query threw (unknown)";
+            }
         }
 
         if (data.is_valid() && data->get_size() > 0) {
