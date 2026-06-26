@@ -243,9 +243,14 @@ void strip_play_callback::load_album_art() {
         // Radio streams and untagged files often have no embedded cover. Fall back
         // to foobar's configured stub image (Display > Album Art > Stub image) so
         // the thumbnail shows something sensible instead of a blank placeholder.
+        // The stub is served by a SEPARATE extractor obtained via open_stub(),
+        // not a method on the regular extractor.
         if (!(data.is_valid() && data->get_size() > 0)) {
-            try { data = extractor->query_stub_image(abort); }
-            catch (...) { /* no stub configured -> leave blank, handled below */ }
+            try {
+                auto stubEx = aamv2->open_stub(abort);
+                if (stubEx.is_valid())
+                    data = stubEx->query(album_art_ids::cover_front, abort);
+            } catch (...) { /* no stub configured -> leave blank, handled below */ }
         }
 
         if (data.is_valid() && data->get_size() > 0) {
