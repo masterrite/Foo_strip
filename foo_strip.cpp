@@ -247,13 +247,24 @@ void strip_play_callback::load_album_art() {
 
         auto aamv2 = album_art_manager_v2::get();
         abort_callback_dummy abort;
-        auto extractor = aamv2->open(items, ids, abort);
 
-        album_art_data_ptr data = extractor->query(album_art_ids::cover_front, abort);
-        bool gotReal = (data.is_valid() && data->get_size() > 0);
-        console::formatter() << "foo_strip: cover_front valid="
-            << (data.is_valid() ? 1 : 0)
-            << " size=" << (data.is_valid() ? (t_uint64)data->get_size() : 0);
+        // Query the real cover art. IMPORTANT: open()/query() THROW when there's
+        // no art (foobar signals "not found" via exception, not an empty result).
+        // Wrap them so a "no art" throw falls through to the stub fallback instead
+        // of unwinding to the outer catch (which silently aborted with no art -
+        // this was why the stub never loaded).
+        album_art_data_ptr data;
+        bool gotReal = false;
+        try {
+            auto extractor = aamv2->open(items, ids, abort);
+            data = extractor->query(album_art_ids::cover_front, abort);
+            gotReal = (data.is_valid() && data->get_size() > 0);
+        } catch (exception_album_art_not_found const &) {
+            console::print("foo_strip: cover_front not found (will try stub)");
+        } catch (std::exception const & e) {
+            console::formatter() << "foo_strip: cover_front query error: " << e.what();
+        }
+        console::formatter() << "foo_strip: gotReal=" << (gotReal ? 1 : 0);
 
         // Radio streams and untagged files often have no embedded cover. Fall back
         // to foobar's configured stub image (Display > Album Art > Stub image) so
