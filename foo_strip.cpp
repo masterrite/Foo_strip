@@ -239,6 +239,15 @@ void strip_play_callback::load_album_art() {
         auto extractor = aamv2->open(items, ids, abort);
 
         album_art_data_ptr data = extractor->query(album_art_ids::cover_front, abort);
+
+        // Radio streams and untagged files often have no embedded cover. Fall back
+        // to foobar's configured stub image (Display > Album Art > Stub image) so
+        // the thumbnail shows something sensible instead of a blank placeholder.
+        if (!(data.is_valid() && data->get_size() > 0)) {
+            try { data = extractor->query_stub_image(abort); }
+            catch (...) { /* no stub configured -> leave blank, handled below */ }
+        }
+
         if (data.is_valid() && data->get_size() > 0) {
             // Wrap raw bytes (JPEG/PNG) in an IStream for GDI+.
             IStream* stream = SHCreateMemStream(
