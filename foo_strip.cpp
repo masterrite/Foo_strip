@@ -202,6 +202,10 @@ public:
 
     void on_playback_dynamic_info_track(const file_info&) override {
         refresh_metadata();
+        // Radio streams don't fire on_playback_new_track per song - the station
+        // stays "playing" while song metadata arrives via dynamic info. Re-fetch
+        // album art here too so per-song art (or the stub) updates for streams.
+        load_album_art();
         strip_notify_repaint();
     }
 
