@@ -34,7 +34,7 @@ namespace {
 // ----------------------------------------------------------------------------
 DECLARE_COMPONENT_VERSION(
     "Floating Playback Strip",
-    "1.3.0",
+    "1.5.0",
     "A draggable floating strip with album art, title, transport, and a working "
     "seek bar. Reads playback directly in-process.\n");
 
@@ -202,6 +202,10 @@ public:
 
     void on_playback_dynamic_info_track(const file_info&) override {
         refresh_metadata();
+        // Radio streams don't fire on_playback_new_track per song - the station
+        // stays "playing" while song metadata arrives via dynamic info. Re-fetch
+        // album art here too so per-song art (or the stub) updates for streams.
+        load_album_art();
         strip_notify_repaint();
     }
 
@@ -219,7 +223,8 @@ private:
     void load_album_art();
 };
 
-// Album art extraction via album_art_manager_v2.
+// Album art extraction via album_art_manager_v2. Falls back to foobar's
+// configured stub image when a track has no embedded/folder cover.
 void strip_play_callback::load_album_art() {
     Gdiplus::Bitmap* newBmp = nullptr;
     try {
@@ -236,9 +241,34 @@ void strip_play_callback::load_album_art() {
 
         auto aamv2 = album_art_manager_v2::get();
         abort_callback_dummy abort;
-        auto extractor = aamv2->open(items, ids, abort);
 
-        album_art_data_ptr data = extractor->query(album_art_ids::cover_front, abort);
+        // Query the real cover art. open()/query() THROW when there's no art
+        // (foobar signals "not found" via exception, not an empty result), so
+        // this needs its own try/catch - otherwise a "no art" throw unwinds past
+        // the stub fallback below to the outer catch and the strip shows nothing.
+        album_art_data_ptr data;
+        bool gotReal = false;
+        try {
+            auto extractor = aamv2->open(items, ids, abort);
+            data = extractor->query(album_art_ids::cover_front, abort);
+            gotReal = (data.is_valid() && data->get_size() > 0);
+        } catch (exception_album_art_not_found const &) {
+            // No embedded/folder art - fall through to the stub below.
+        } catch (std::exception const &) {
+            // Any other extraction error - also fall through to the stub.
+        }
+
+        // Radio streams and untagged files often have no cover. Fall back to
+        // foobar's configured stub image (Display > Album Art > Stub image), which
+        // is served by a SEPARATE extractor obtained via open_stub().
+        if (!gotReal) {
+            try {
+                auto stubEx = aamv2->open_stub(abort);
+                if (stubEx.is_valid())
+                    data = stubEx->query(album_art_ids::cover_front, abort);
+            } catch (...) { /* no stub configured -> leave blank, handled below */ }
+        }
+
         if (data.is_valid() && data->get_size() > 0) {
             // Wrap raw bytes (JPEG/PNG) in an IStream for GDI+.
             IStream* stream = SHCreateMemStream(
