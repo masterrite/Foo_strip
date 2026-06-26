@@ -226,10 +226,17 @@ private:
 // Album art extraction via album_art_manager_v2.
 void strip_play_callback::load_album_art() {
     Gdiplus::Bitmap* newBmp = nullptr;
+    console::print("foo_strip: load_album_art() entered");
     try {
         auto pc = playback_control::get();
         metadb_handle_ptr track;
-        if (!pc->get_now_playing(track) || track.is_empty()) return;
+        bool np = pc->get_now_playing(track);
+        console::formatter() << "foo_strip: get_now_playing=" << (np ? 1 : 0)
+            << " track_valid=" << (track.is_valid() ? 1 : 0);
+        if (!np || track.is_empty()) {
+            console::print("foo_strip: bailing - no now-playing track yet");
+            return;
+        }
 
         // Build the single-item handle list and single-id list the API expects.
         metadb_handle_list items;
