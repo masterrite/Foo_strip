@@ -244,6 +244,9 @@ void strip_play_callback::load_album_art() {
 
         album_art_data_ptr data = extractor->query(album_art_ids::cover_front, abort);
         bool gotReal = (data.is_valid() && data->get_size() > 0);
+        console::formatter() << "foo_strip: cover_front valid="
+            << (data.is_valid() ? 1 : 0)
+            << " size=" << (data.is_valid() ? (t_uint64)data->get_size() : 0);
 
         // Radio streams and untagged files often have no embedded cover. Fall back
         // to foobar's configured stub image (Display > Album Art > Stub image) so
@@ -275,10 +278,17 @@ void strip_play_callback::load_album_art() {
             if (stream) {
                 newBmp = Gdiplus::Bitmap::FromStream(stream);
                 stream->Release();
-                if (newBmp && newBmp->GetLastStatus() != Gdiplus::Ok) {
-                    delete newBmp;
-                    newBmp = nullptr;
+                if (newBmp) {
+                    auto status = newBmp->GetLastStatus();
+                    console::formatter() << "foo_strip: decode status=" << (int)status
+                        << " (0=Ok) dims=" << (status == Gdiplus::Ok ? newBmp->GetWidth() : 0)
+                        << "x" << (status == Gdiplus::Ok ? newBmp->GetHeight() : 0);
+                    if (status != Gdiplus::Ok) { delete newBmp; newBmp = nullptr; }
+                } else {
+                    console::formatter() << "foo_strip: FromStream returned null";
                 }
+            } else {
+                console::formatter() << "foo_strip: SHCreateMemStream failed";
             }
         }
     } catch (...) {
