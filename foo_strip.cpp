@@ -34,7 +34,7 @@ namespace {
 // ----------------------------------------------------------------------------
 DECLARE_COMPONENT_VERSION(
     "Floating Playback Strip",
-    "1.3.0",
+    "1.5.0",
     "A draggable floating strip with album art, title, transport, and a working "
     "seek bar. Reads playback directly in-process.\n");
 
@@ -223,20 +223,14 @@ private:
     void load_album_art();
 };
 
-// Album art extraction via album_art_manager_v2.
+// Album art extraction via album_art_manager_v2. Falls back to foobar's
+// configured stub image when a track has no embedded/folder cover.
 void strip_play_callback::load_album_art() {
     Gdiplus::Bitmap* newBmp = nullptr;
-    console::print("foo_strip: load_album_art() entered");
     try {
         auto pc = playback_control::get();
         metadb_handle_ptr track;
-        bool np = pc->get_now_playing(track);
-        console::formatter() << "foo_strip: get_now_playing=" << (np ? 1 : 0)
-            << " track_valid=" << (track.is_valid() ? 1 : 0);
-        if (!np || track.is_empty()) {
-            console::print("foo_strip: bailing - no now-playing track yet");
-            return;
-        }
+        if (!pc->get_now_playing(track) || track.is_empty()) return;
 
         // Build the single-item handle list and single-id list the API expects.
         metadb_handle_list items;
@@ -248,11 +242,10 @@ void strip_play_callback::load_album_art() {
         auto aamv2 = album_art_manager_v2::get();
         abort_callback_dummy abort;
 
-        // Query the real cover art. IMPORTANT: open()/query() THROW when there's
-        // no art (foobar signals "not found" via exception, not an empty result).
-        // Wrap them so a "no art" throw falls through to the stub fallback instead
-        // of unwinding to the outer catch (which silently aborted with no art -
-        // this was why the stub never loaded).
+        // Query the real cover art. open()/query() THROW when there's no art
+        // (foobar signals "not found" via exception, not an empty result), so
+        // this needs its own try/catch - otherwise a "no art" throw unwinds past
+        // the stub fallback below to the outer catch and the strip shows nothing.
         album_art_data_ptr data;
         bool gotReal = false;
         try {
@@ -260,32 +253,20 @@ void strip_play_callback::load_album_art() {
             data = extractor->query(album_art_ids::cover_front, abort);
             gotReal = (data.is_valid() && data->get_size() > 0);
         } catch (exception_album_art_not_found const &) {
-            console::print("foo_strip: cover_front not found (will try stub)");
-        } catch (std::exception const & e) {
-            console::formatter() << "foo_strip: cover_front query error: " << e.what();
+            // No embedded/folder art - fall through to the stub below.
+        } catch (std::exception const &) {
+            // Any other extraction error - also fall through to the stub.
         }
-        console::formatter() << "foo_strip: gotReal=" << (gotReal ? 1 : 0);
 
-        // Radio streams and untagged files often have no embedded cover. Fall back
-        // to foobar's configured stub image (Display > Album Art > Stub image) so
-        // the thumbnail shows something sensible instead of a blank placeholder.
-        // The stub is served by a SEPARATE extractor obtained via open_stub().
+        // Radio streams and untagged files often have no cover. Fall back to
+        // foobar's configured stub image (Display > Album Art > Stub image), which
+        // is served by a SEPARATE extractor obtained via open_stub().
         if (!gotReal) {
             try {
                 auto stubEx = aamv2->open_stub(abort);
-                console::formatter() << "foo_strip: open_stub valid="
-                    << (stubEx.is_valid() ? 1 : 0);
-                if (stubEx.is_valid()) {
+                if (stubEx.is_valid())
                     data = stubEx->query(album_art_ids::cover_front, abort);
-                    console::formatter() << "foo_strip: stub query valid="
-                        << (data.is_valid() ? 1 : 0)
-                        << " size=" << (data.is_valid() ? (t_uint64)data->get_size() : 0);
-                }
-            } catch (std::exception const & e) {
-                console::formatter() << "foo_strip: stub query threw: " << e.what();
-            } catch (...) {
-                console::formatter() << "foo_strip: stub query threw (unknown)";
-            }
+            } catch (...) { /* no stub configured -> leave blank, handled below */ }
         }
 
         if (data.is_valid() && data->get_size() > 0) {
@@ -296,17 +277,10 @@ void strip_play_callback::load_album_art() {
             if (stream) {
                 newBmp = Gdiplus::Bitmap::FromStream(stream);
                 stream->Release();
-                if (newBmp) {
-                    auto status = newBmp->GetLastStatus();
-                    console::formatter() << "foo_strip: decode status=" << (int)status
-                        << " (0=Ok) dims=" << (status == Gdiplus::Ok ? newBmp->GetWidth() : 0)
-                        << "x" << (status == Gdiplus::Ok ? newBmp->GetHeight() : 0);
-                    if (status != Gdiplus::Ok) { delete newBmp; newBmp = nullptr; }
-                } else {
-                    console::formatter() << "foo_strip: FromStream returned null";
+                if (newBmp && newBmp->GetLastStatus() != Gdiplus::Ok) {
+                    delete newBmp;
+                    newBmp = nullptr;
                 }
-            } else {
-                console::formatter() << "foo_strip: SHCreateMemStream failed";
             }
         }
     } catch (...) {
