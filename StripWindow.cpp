@@ -149,6 +149,20 @@ RECT g_rcArt{};                      // art thumbnail rect (set each paint)
 inline int kPopupSize() { return (int)(strip_load_popup_size() * g_scale + 0.5); } // enlarged art dim
 const wchar_t* kPopupClass = L"FoobarStripArtPopup";
 
+// Cached, pre-scaled strip thumbnail. Scaling the FULL-resolution cover to the
+// tiny strip size on every 60fps repaint is very expensive for large covers
+// (a 4000x4000 image resampled 60x/sec = the reported 16-19% CPU). We instead
+// scale ONCE into this cache and blit it each frame, re-scaling only when the
+// source art or the target size changes.
+Gdiplus::Bitmap* g_artThumb = nullptr;   // owned pre-scaled thumbnail
+const void*      g_artThumbSrc = nullptr; // source bitmap the thumb was made from
+int              g_artThumbSize = 0;      // target size the thumb was scaled to
+
+static void invalidate_art_thumb() {      // called when the source art changes
+    delete g_artThumb; g_artThumb = nullptr;
+    g_artThumbSrc = nullptr; g_artThumbSize = 0;
+}
+
 // Forward declarations (defined after StripProc).
 void show_art_popup();
 void hide_art_popup();
@@ -424,7 +438,23 @@ void paint(HWND hwnd) {
         int ay = contentTop;
         g_rcArt = { ax, ay, ax + artSize, ay + artSize }; // hover hit-testing
         if (art) {
-            g.DrawImage(art, ax, ay, artSize, artSize);
+            // Rebuild the cached thumbnail only when the source art or the target
+            // size changes - NOT every frame. Drawing the pre-scaled thumb is
+            // cheap regardless of the original cover's resolution.
+            if (g_artThumb == nullptr || g_artThumbSrc != art || g_artThumbSize != artSize) {
+                invalidate_art_thumb();
+                if (artSize > 0) {
+                    g_artThumb = new Gdiplus::Bitmap(artSize, artSize, PixelFormat32bppPARGB);
+                    Gdiplus::Graphics tg(g_artThumb);
+                    tg.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+                    tg.SetPixelOffsetMode(PixelOffsetModeHalf);
+                    tg.DrawImage(art, 0, 0, artSize, artSize);
+                    g_artThumbSrc = art;
+                    g_artThumbSize = artSize;
+                }
+            }
+            if (g_artThumb)
+                g.DrawImage(g_artThumb, ax, ay, artSize, artSize);
         } else {
             SolidBrush ph(theme().artPh);
             g.FillRectangle(&ph, ax, ay, artSize, artSize);
@@ -1465,6 +1495,7 @@ void strip_destroy_window() {
         g_hwnd = nullptr;
     }
     UnregisterClass(kClassName, core_api::get_my_instance());
+    invalidate_art_thumb();   // free cached thumbnail while GDI+ is still up
     if (g_gdiplusToken) {
         GdiplusShutdown(g_gdiplusToken);
         g_gdiplusToken = 0;

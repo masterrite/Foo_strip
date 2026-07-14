@@ -34,7 +34,7 @@ namespace {
 // ----------------------------------------------------------------------------
 DECLARE_COMPONENT_VERSION(
     "Floating Playback Strip",
-    "1.5.0",
+    "1.5.1",
     "A draggable floating strip with album art, title, transport, and a working "
     "seek bar. Reads playback directly in-process.\n");
 
@@ -156,6 +156,11 @@ public:
         strip_reset_interp();
 
         load_album_art();
+        // Sync the dynamic-info art key so a fresh track (file or stream start)
+        // is always considered "changed" and the next dynamic-info compares
+        // against this track, not the previous one.
+        { std::lock_guard<std::mutex> g(g_state.lock);
+          m_lastArtKey = g_state.title + L"\x1f" + g_state.artist; }
         strip_notify_repaint();
     }
 
@@ -205,7 +210,18 @@ public:
         // Radio streams don't fire on_playback_new_track per song - the station
         // stays "playing" while song metadata arrives via dynamic info. Re-fetch
         // album art here too so per-song art (or the stub) updates for streams.
-        load_album_art();
+        //
+        // BUT dynamic-info fires often - on every metadata update, buffering blip,
+        // or keepalive, frequently with IDENTICAL title/artist. Re-decoding the art
+        // each time was pure wasted CPU (the reported spikes). So only re-fetch when
+        // the track identity actually changed since the last art load.
+        std::wstring key;
+        { std::lock_guard<std::mutex> g(g_state.lock);
+          key = g_state.title + L"\x1f" + g_state.artist; }
+        if (key != m_lastArtKey) {
+            m_lastArtKey = key;
+            load_album_art();
+        }
         strip_notify_repaint();
     }
 
@@ -221,6 +237,10 @@ public:
 private:
     // Pull album art for the current track and hand a GDI+ bitmap to the state.
     void load_album_art();
+
+    // Track identity (title\x1f artist) at the last art fetch, so radio dynamic-
+    // info updates only re-decode art when the song actually changes.
+    std::wstring m_lastArtKey;
 };
 
 // Album art extraction via album_art_manager_v2. Falls back to foobar's
@@ -280,6 +300,33 @@ void strip_play_callback::load_album_art() {
                 if (newBmp && newBmp->GetLastStatus() != Gdiplus::Ok) {
                     delete newBmp;
                     newBmp = nullptr;
+                }
+
+                // Cap the working copy at 1200px on the longest side. Large covers
+                // (e.g. 4000x4000) are expensive to hold and scale; a 1200px copy
+                // is plenty for the strip thumbnail and the hover popup. This only
+                // touches our IN-MEMORY bitmap - the user's file is never modified.
+                // Art already <=1200 on both sides is left exactly as-is.
+                const UINT kMaxDim = 1200;
+                if (newBmp) {
+                    UINT ow = newBmp->GetWidth(), oh = newBmp->GetHeight();
+                    if (ow > kMaxDim || oh > kMaxDim) {
+                        double s = (double)kMaxDim / (ow > oh ? ow : oh);
+                        int nw = (int)(ow * s + 0.5), nh = (int)(oh * s + 0.5);
+                        if (nw < 1) nw = 1;
+                        if (nh < 1) nh = 1;
+                        auto* smallBmp = new Gdiplus::Bitmap(nw, nh, PixelFormat32bppPARGB);
+                        if (smallBmp->GetLastStatus() == Gdiplus::Ok) {
+                            Gdiplus::Graphics gs(smallBmp);
+                            gs.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+                            gs.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+                            gs.DrawImage(newBmp, 0, 0, nw, nh);
+                            delete newBmp;      // free the oversized in-memory copy
+                            newBmp = smallBmp;     // keep the downsized working copy
+                        } else {
+                            delete smallBmp;       // couldn't allocate - keep original
+                        }
+                    }
                 }
             }
         }
