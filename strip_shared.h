@@ -19,6 +19,10 @@ struct StripState {
     double volume_linear = 1.0; // 0..1 (mapped from foobar's dB volume)
     bool muted = false;
     Gdiplus::Bitmap* art = nullptr; // owned; swapped under lock
+    unsigned artGen = 0;            // bumped on every art swap; cache key for the
+                                    // strip thumbnail (pointer identity is NOT
+                                    // reliable - the heap can reuse the freed
+                                    // address for the next track's bitmap)
     std::mutex lock;
 };
 

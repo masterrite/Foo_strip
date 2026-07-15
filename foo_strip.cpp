@@ -34,7 +34,7 @@ namespace {
 // ----------------------------------------------------------------------------
 DECLARE_COMPONENT_VERSION(
     "Floating Playback Strip",
-    "1.5.1",
+    "1.5.2",
     "A draggable floating strip with album art, title, transport, and a working "
     "seek bar. Reads playback directly in-process.\n");
 
@@ -174,6 +174,7 @@ public:
             g_state.canSeek = false;
             delete g_state.art;
             g_state.art = nullptr;
+            g_state.artGen++;
         }
         strip_notify_repaint();
     }
@@ -337,6 +338,7 @@ void strip_play_callback::load_album_art() {
     std::lock_guard<std::mutex> guard(g_state.lock);
     delete g_state.art;
     g_state.art = newBmp;
+    g_state.artGen++;   // invalidates the strip's cached thumbnail
 }
 
 static play_callback_static_factory_t<strip_play_callback> g_play_cb_factory;
@@ -365,6 +367,7 @@ public:
         std::lock_guard<std::mutex> guard(g_state.lock);
         delete g_state.art;
         g_state.art = nullptr;
+        g_state.artGen++;
     }
 };
 

@@ -155,12 +155,12 @@ const wchar_t* kPopupClass = L"FoobarStripArtPopup";
 // scale ONCE into this cache and blit it each frame, re-scaling only when the
 // source art or the target size changes.
 Gdiplus::Bitmap* g_artThumb = nullptr;   // owned pre-scaled thumbnail
-const void*      g_artThumbSrc = nullptr; // source bitmap the thumb was made from
+unsigned         g_artThumbGen = 0;       // art generation the thumb was made from
 int              g_artThumbSize = 0;      // target size the thumb was scaled to
 
 static void invalidate_art_thumb() {      // called when the source art changes
     delete g_artThumb; g_artThumb = nullptr;
-    g_artThumbSrc = nullptr; g_artThumbSize = 0;
+    g_artThumbGen = 0; g_artThumbSize = 0;
 }
 
 // Forward declarations (defined after StripProc).
@@ -378,6 +378,7 @@ void paint(HWND hwnd) {
     double frac = 0.0;
     bool playing = false, canSeek = false;
     Bitmap* art = nullptr;
+    unsigned artGen = 0;
     {
         auto& st = strip_get_state();
         std::lock_guard<std::mutex> guard(st.lock);
@@ -386,6 +387,7 @@ void paint(HWND hwnd) {
         playing = st.playing;
         canSeek = st.canSeek;
         art = st.art;
+        artGen = st.artGen;
         double pos = g_scrubbing ? g_scrub_preview * st.length : g_interp_position;
         if (st.length > 0) frac = min(1.0, max(0.0, pos / st.length));
         timeStr = fmt_time(pos) + L" / " + fmt_time(st.length);
@@ -438,10 +440,11 @@ void paint(HWND hwnd) {
         int ay = contentTop;
         g_rcArt = { ax, ay, ax + artSize, ay + artSize }; // hover hit-testing
         if (art) {
-            // Rebuild the cached thumbnail only when the source art or the target
-            // size changes - NOT every frame. Drawing the pre-scaled thumb is
-            // cheap regardless of the original cover's resolution.
-            if (g_artThumb == nullptr || g_artThumbSrc != art || g_artThumbSize != artSize) {
+            // Rebuild the cached thumbnail only when the art GENERATION or the
+            // target size changes - NOT every frame, and NOT keyed on the bitmap
+            // pointer (the heap can hand the next track's bitmap the same address
+            // as the freed previous one, which made a pointer key serve stale art).
+            if (g_artThumb == nullptr || g_artThumbGen != artGen || g_artThumbSize != artSize) {
                 invalidate_art_thumb();
                 if (artSize > 0) {
                     g_artThumb = new Gdiplus::Bitmap(artSize, artSize, PixelFormat32bppPARGB);
@@ -449,7 +452,7 @@ void paint(HWND hwnd) {
                     tg.SetInterpolationMode(InterpolationModeHighQualityBicubic);
                     tg.SetPixelOffsetMode(PixelOffsetModeHalf);
                     tg.DrawImage(art, 0, 0, artSize, artSize);
-                    g_artThumbSrc = art;
+                    g_artThumbGen = artGen;
                     g_artThumbSize = artSize;
                 }
             }
