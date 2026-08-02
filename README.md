@@ -28,7 +28,7 @@ This is a personal project to solve the problem that Windows 11 doesn't allow ta
 - Hides automatically when a fullscreen game/video is in front
 - Right-click in the strip to open customization settings
   - change basically everything but the album art thumbnail
-- Double-click album art to bring up foobar window
+- Double-click album art to bring up/hide foobar window
 - "Toggle floating strip" under View menu and bindable to a button in Column UI
 
 ## Caveat
