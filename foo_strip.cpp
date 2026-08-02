@@ -34,7 +34,7 @@ namespace {
 // ----------------------------------------------------------------------------
 DECLARE_COMPONENT_VERSION(
     "Floating Playback Strip",
-    "1.5.2",
+    "1.5.3",
     "A draggable floating strip with album art, title, transport, and a working "
     "seek bar. Reads playback directly in-process.\n");
 

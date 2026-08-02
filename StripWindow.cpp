@@ -942,30 +942,39 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
 
     case WM_LBUTTONDBLCLK: {
-        // Double-click the album art -> bring foobar's main window to the front
-        // (a common, intuitive shortcut). Elsewhere on the strip, double-click
-        // does nothing special (the first click already did its action).
+        // Double-click the album art -> toggle foobar's main window:
+        //   - minimized               -> restore + bring to front
+        //   - visible but not front   -> bring to front
+        //   - already the front window -> minimize
+        // Elsewhere on the strip, double-click does nothing special (the first
+        // click already did its action).
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
         if (pt_in(g_rcArt, x, y)) {
             HWND fb = core_api::get_main_window();
             if (fb) {
-                // Restore-then-raise foobar's main window, reliably even from
-                // minimized. The order matters: we AttachThreadInput to foobar's
-                // OWN thread FIRST, then do the restore + raise INSIDE the attach.
-                // While attached, our show/activate calls behave as if issued by
-                // foobar's own thread, so the foreground lock doesn't block them
-                // and the restore's activation isn't lost to a race. Detaching
-                // last keeps the whole sequence as one atomic operation.
-                DWORD fbT = GetWindowThreadProcessId(fb, nullptr);
-                DWORD myT = GetCurrentThreadId();
-                bool attached = (fbT && fbT != myT && AttachThreadInput(myT, fbT, TRUE));
+                if (!IsIconic(fb) && GetForegroundWindow() == fb) {
+                    // Frontmost -> hide it out of the way.
+                    ShowWindow(fb, SW_MINIMIZE);
+                } else {
+                    // Restore-then-raise foobar's main window, reliably even from
+                    // minimized. The order matters: we AttachThreadInput to
+                    // foobar's OWN thread FIRST, then do the restore + raise
+                    // INSIDE the attach. While attached, our show/activate calls
+                    // behave as if issued by foobar's own thread, so the
+                    // foreground lock doesn't block them and the restore's
+                    // activation isn't lost to a race. Detaching last keeps the
+                    // whole sequence as one atomic operation.
+                    DWORD fbT = GetWindowThreadProcessId(fb, nullptr);
+                    DWORD myT = GetCurrentThreadId();
+                    bool attached = (fbT && fbT != myT && AttachThreadInput(myT, fbT, TRUE));
 
-                if (IsIconic(fb)) ShowWindow(fb, SW_RESTORE);   // 1. un-minimize
-                SetForegroundWindow(fb);                        // 2. raise + focus
-                BringWindowToTop(fb);
-                SetActiveWindow(fb);
+                    if (IsIconic(fb)) ShowWindow(fb, SW_RESTORE);   // 1. un-minimize
+                    SetForegroundWindow(fb);                        // 2. raise + focus
+                    BringWindowToTop(fb);
+                    SetActiveWindow(fb);
 
-                if (attached) AttachThreadInput(myT, fbT, FALSE);
+                    if (attached) AttachThreadInput(myT, fbT, FALSE);
+                }
             }
         }
         return 0;
