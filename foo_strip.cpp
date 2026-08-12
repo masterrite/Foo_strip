@@ -34,7 +34,7 @@ namespace {
 // ----------------------------------------------------------------------------
 DECLARE_COMPONENT_VERSION(
     "Floating Playback Strip",
-    "1.5.3",
+    "1.5.4",
     "A draggable floating strip with album art, title, transport, and a working "
     "seek bar. Reads playback directly in-process.\n");
 
@@ -563,6 +563,14 @@ static cfg_bool g_cfg_show_popup(
 
 bool strip_load_show_popup()         { return g_cfg_show_popup; }
 void strip_save_show_popup(bool s)   { g_cfg_show_popup = s; }
+
+// Auto-hide: when the strip sits at a monitor edge, slide it away after the
+// mouse leaves and reveal it when the cursor touches that edge. Default off.
+static cfg_bool g_cfg_auto_hide(
+    GUID{ 0x9a3f1c32, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x5d } }, false);
+
+bool strip_load_auto_hide()          { return g_cfg_auto_hide; }
+void strip_save_auto_hide(bool s)    { g_cfg_auto_hide = s; }
 
 // Master strip visibility. When false the whole strip window is hidden; the only
 // way back is this setting (the strip isn't there to click). Persists across

@@ -131,6 +131,32 @@ bool g_moveLoopActive = false;
 bool g_hiddenForFullscreen = false;
 bool g_hiddenByUser = false;   // master "Show strip" toggle (persists)
 
+// --- Auto-hide at screen edge (opt-in setting) -----------------------------
+// When enabled and the strip is parked at a monitor edge, it hides shortly
+// after the cursor leaves it and pops back when the cursor touches that edge.
+bool g_autoHidden = false;            // currently hidden by auto-hide
+int  g_autoHideEdge = -1;             // 0=left 1=top 2=right 3=bottom, -1=none
+RECT g_autoHideRect{};                // strip rect at the moment it auto-hid
+ULONGLONG g_cursorOffSinceMs = 0;     // when the cursor left the strip (0 = on it)
+
+// If the strip's window rect touches (within tol px of) an edge of its monitor,
+// return that edge index; else -1. Prefers the edge it's closest to.
+static int strip_docked_edge(HWND hwnd, int tol) {
+    RECT r{}; GetWindowRect(hwnd, &r);
+    HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{ sizeof(mi) };
+    if (!GetMonitorInfo(mon, &mi)) return -1;
+    const RECT& m = mi.rcMonitor;
+    int dl = r.left - m.left, dt = r.top - m.top,
+        dr = m.right - r.right, db = m.bottom - r.bottom;
+    int best = -1, bestDist = tol + 1;
+    if (dl >= 0 && dl < bestDist) { best = 0; bestDist = dl; }
+    if (dt >= 0 && dt < bestDist) { best = 1; bestDist = dt; }
+    if (dr >= 0 && dr < bestDist) { best = 2; bestDist = dr; }
+    if (db >= 0 && db < bestDist) { best = 3; bestDist = db; }
+    return best;
+}
+
 // Interaction state
 bool g_scrubbing = false;
 double g_scrub_preview = 0.0; // 0..1 while dragging the seek bar
@@ -804,6 +830,7 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER: {
         auto& st = strip_get_state();
         bool needsRepaintOut = false;
+        bool forcePaintOut = false;   // auto-hide reveal: paint after lock release
         {
         std::lock_guard<std::mutex> guard(st.lock);
         ULONGLONG now = GetTickCount64();
@@ -823,6 +850,64 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
         }
 
+        // Auto-hide at screen edge (opt-in): when the strip is parked at a
+        // monitor edge, hide it once the cursor has been off it for a moment,
+        // and reveal it when the cursor touches a thin band at that edge. Runs
+        // on the same 16ms timer (hidden windows still receive WM_TIMER); only
+        // GetCursorPos + rect math, so the polling cost is negligible.
+        if (!g_hiddenForFullscreen && !g_hiddenByUser) {
+            bool ah = strip_load_auto_hide();
+            POINT cur{}; GetCursorPos(&cur);
+            if (!ah && g_autoHidden) {
+                // Setting switched off while hidden -> come back.
+                g_autoHidden = false; g_autoHideEdge = -1;
+                ShowWindow(hwnd, SW_SHOWNA);
+            } else if (ah && !g_autoHidden) {
+                int edge = strip_docked_edge(hwnd, (int)(8 * g_scale + 0.5));
+                if (edge >= 0) {
+                    RECT wr{}; GetWindowRect(hwnd, &wr);
+                    bool over = PtInRect(&wr, cur) != 0;
+                    if (over) g_cursorOffSinceMs = 0;
+                    else if (g_cursorOffSinceMs == 0) g_cursorOffSinceMs = now;
+                    // Hide after ~600ms off the strip (grace so it doesn't
+                    // vanish the instant the cursor slips off).
+                    if (!over && g_cursorOffSinceMs && now - g_cursorOffSinceMs > 600
+                        && !g_scrubbing && !g_artHover) {
+                        g_autoHidden = true;
+                        g_autoHideEdge = edge;
+                        g_autoHideRect = wr;
+                        g_cursorOffSinceMs = 0;
+                        ShowWindow(hwnd, SW_HIDE);
+                    }
+                } else {
+                    g_cursorOffSinceMs = 0;   // not docked; never auto-hide
+                }
+            } else if (ah && g_autoHidden) {
+                // Reveal when the cursor touches the edge band where the strip
+                // was parked (its extent along the edge, a few px deep).
+                RECT band = g_autoHideRect;
+                int depth = (int)(4 * g_scale + 0.5); if (depth < 2) depth = 2;
+                switch (g_autoHideEdge) {
+                    case 0: band.right = band.left + depth; break;   // left
+                    case 1: band.bottom = band.top + depth; break;   // top
+                    case 2: band.left = band.right - depth; break;   // right
+                    case 3: band.top = band.bottom - depth; break;   // bottom
+                }
+                if (PtInRect(&band, cur)) {
+                    g_autoHidden = false; g_autoHideEdge = -1;
+                    ShowWindow(hwnd, SW_SHOWNA);
+                    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                    // Layered window: must render on show, but paint() locks
+                    // st.lock which THIS block already holds - calling it here
+                    // deadlocks/crashes (same-thread relock of std::mutex, the
+                    // exact bug the needsRepaintOut flag exists to avoid). So
+                    // request the paint and let it run after the lock releases.
+                    forcePaintOut = true;
+                }
+            }
+        }
+
         // Re-assert topmost z-order frequently (every ~200ms, separate from the
         // 1s fullscreen check). A one-time WS_EX_TOPMOST isn't enough to stay
         // above the taskbar - when the strip sits ON the taskbar and you open
@@ -831,12 +916,12 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // the ceiling for a normal window; we can't permanently beat the taskbar,
         // but ~5x/sec keeps it visible in practice.
         static ULONGLONG s_lastTop = 0;
-        if (!g_hiddenForFullscreen && !g_hiddenByUser && now - s_lastTop >= 200) {
+        if (!g_hiddenForFullscreen && !g_hiddenByUser && !g_autoHidden && now - s_lastTop >= 200) {
             s_lastTop = now;
             SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
-        if (g_hiddenForFullscreen || g_hiddenByUser) return 0; // nothing to draw while hidden
+        if (g_hiddenForFullscreen || g_hiddenByUser || g_autoHidden) return 0; // nothing to draw while hidden
 
         // (2) While a seek is pending, keep showing the target until foobar's
         // reported position reaches it (within ~0.6s), then resume normal flow.
@@ -933,7 +1018,7 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // paint() directly rather than InvalidateRect (which only schedules a
         // WM_PAINT that may never arrive). paint() locks st.lock itself, so we
         // must release THIS lock first (scope ends here) to avoid self-deadlock.
-        needsRepaintOut = needsRepaint;
+        needsRepaintOut = needsRepaint || forcePaintOut;
         } // release st.lock before painting
 
         if (needsRepaintOut)
@@ -1482,6 +1567,7 @@ void strip_apply_visibility() {
     if (!g_hwnd) return;
     bool show = strip_load_show_strip();
     g_hiddenByUser = !show;
+    g_autoHidden = false; g_autoHideEdge = -1;   // master toggle overrides auto-hide
     if (show) {
         ShowWindow(g_hwnd, SW_SHOWNA);
         SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
