@@ -132,12 +132,34 @@ bool g_hiddenForFullscreen = false;
 bool g_hiddenByUser = false;   // master "Show strip" toggle (persists)
 
 // --- Auto-hide at screen edge (opt-in setting) -----------------------------
-// When enabled and the strip is parked at a monitor edge, it hides shortly
-// after the cursor leaves it and pops back when the cursor touches that edge.
-bool g_autoHidden = false;            // currently hidden by auto-hide
+// When enabled and the strip is parked at a monitor edge, it SLIDES off-screen
+// after the cursor leaves it, and slides back when the cursor touches that edge.
+// State machine: shown -> sliding out -> hidden -> sliding in -> shown.
+bool g_autoHidden = false;            // fully hidden (parked off-screen)
 int  g_autoHideEdge = -1;             // 0=left 1=top 2=right 3=bottom, -1=none
-RECT g_autoHideRect{};                // strip rect at the moment it auto-hid
+RECT g_autoHideShownRect{};           // the strip's docked (fully visible) rect
 ULONGLONG g_cursorOffSinceMs = 0;     // when the cursor left the strip (0 = on it)
+int  g_slideDir = 0;                  // 0 = idle, +1 = sliding out, -1 = sliding in
+double g_slideT = 0.0;                // 0.0 = fully shown, 1.0 = fully hidden
+// A sliver stays on-screen while hidden so the strip is easy to grab/reveal.
+inline int auto_hide_peek() { int p = (int)(3 * g_scale + 0.5); return p < 2 ? 2 : p; }
+
+// Offset the docked rect by the current slide progress along its edge.
+static void auto_hide_apply_slide(HWND hwnd) {
+    if (g_autoHideEdge < 0) return;
+    RECT r = g_autoHideShownRect;
+    int w = r.right - r.left, h = r.bottom - r.top;
+    int peek = auto_hide_peek();
+    int dx = 0, dy = 0;
+    switch (g_autoHideEdge) {
+        case 0: dx = -(int)((w - peek) * g_slideT); break;   // slide left
+        case 1: dy = -(int)((h - peek) * g_slideT); break;   // slide up
+        case 2: dx =  (int)((w - peek) * g_slideT); break;   // slide right
+        case 3: dy =  (int)((h - peek) * g_slideT); break;   // slide down
+    }
+    SetWindowPos(hwnd, HWND_TOPMOST, r.left + dx, r.top + dy, 0, 0,
+                 SWP_NOSIZE | SWP_NOACTIVATE);
+}
 
 // If the strip's window rect touches (within tol px of) an edge of its monitor,
 // return that edge index; else -1. Prefers the edge it's closest to.
@@ -851,59 +873,90 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         // Auto-hide at screen edge (opt-in): when the strip is parked at a
-        // monitor edge, hide it once the cursor has been off it for a moment,
-        // and reveal it when the cursor touches a thin band at that edge. Runs
-        // on the same 16ms timer (hidden windows still receive WM_TIMER); only
-        // GetCursorPos + rect math, so the polling cost is negligible.
+        // monitor edge it SLIDES off after the cursor leaves, and slides back
+        // when the cursor touches the edge. Runs on the same 16ms timer, so the
+        // slide is ~60fps. The window is never SW_HIDDEN - it parks off-screen
+        // with a few-px sliver on the edge, which keeps it able to receive the
+        // cursor and avoids show/hide flicker.
         if (!g_hiddenForFullscreen && !g_hiddenByUser) {
             bool ah = strip_load_auto_hide();
             POINT cur{}; GetCursorPos(&cur);
-            if (!ah && g_autoHidden) {
-                // Setting switched off while hidden -> come back.
-                g_autoHidden = false; g_autoHideEdge = -1;
-                ShowWindow(hwnd, SW_SHOWNA);
-            } else if (ah && !g_autoHidden) {
-                int edge = strip_docked_edge(hwnd, (int)(8 * g_scale + 0.5));
-                if (edge >= 0) {
+
+            if (!ah) {
+                // Setting off: make sure we're fully shown and idle.
+                if (g_autoHidden || g_slideDir != 0 || g_slideT != 0.0) {
+                    if (g_autoHideEdge >= 0) {
+                        g_slideT = 0.0;
+                        auto_hide_apply_slide(hwnd);
+                    }
+                    g_autoHidden = false; g_slideDir = 0;
+                    g_slideT = 0.0; g_autoHideEdge = -1;
+                    forcePaintOut = true;
+                }
+                g_cursorOffSinceMs = 0;
+            } else {
+                // Establish/refresh the docked edge while fully shown, so a
+                // dragged strip re-docks to wherever the user parked it.
+                if (g_slideDir == 0 && !g_autoHidden && !g_moveLoopActive) {
+                    int edge = strip_docked_edge(hwnd, (int)(12 * g_scale + 0.5));
+                    g_autoHideEdge = edge;
+                    if (edge >= 0) GetWindowRect(hwnd, &g_autoHideShownRect);
+                }
+
+                if (g_autoHideEdge >= 0 && !g_moveLoopActive) {
+                    // Reveal band: anchored to the MONITOR edge (not the strip's
+                    // rect), deep enough to hit reliably and a little wider than
+                    // the strip, so you don't need pixel-precision to call it out.
+                    RECT band = g_autoHideShownRect;
+                    int depth = (int)(6 * g_scale + 0.5); if (depth < 3) depth = 3;
+                    int slack = (int)(24 * g_scale + 0.5);
+                    HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                    MONITORINFO mi{ sizeof(mi) };
+                    if (GetMonitorInfo(mon, &mi)) {
+                        const RECT& m = mi.rcMonitor;
+                        switch (g_autoHideEdge) {
+                            case 0: band.left = m.left;  band.right  = m.left + depth;
+                                    band.top -= slack;   band.bottom += slack; break;
+                            case 1: band.top  = m.top;   band.bottom = m.top + depth;
+                                    band.left -= slack;  band.right  += slack; break;
+                            case 2: band.right = m.right; band.left  = m.right - depth;
+                                    band.top -= slack;   band.bottom += slack; break;
+                            case 3: band.bottom = m.bottom; band.top = m.bottom - depth;
+                                    band.left -= slack;  band.right  += slack; break;
+                        }
+                    }
+
                     RECT wr{}; GetWindowRect(hwnd, &wr);
-                    bool over = PtInRect(&wr, cur) != 0;
-                    if (over) g_cursorOffSinceMs = 0;
-                    else if (g_cursorOffSinceMs == 0) g_cursorOffSinceMs = now;
-                    // Hide after ~600ms off the strip (grace so it doesn't
-                    // vanish the instant the cursor slips off).
-                    if (!over && g_cursorOffSinceMs && now - g_cursorOffSinceMs > 600
-                        && !g_scrubbing && !g_artHover) {
-                        g_autoHidden = true;
-                        g_autoHideEdge = edge;
-                        g_autoHideRect = wr;
+                    bool overStrip = PtInRect(&wr, cur) != 0;
+                    bool overBand  = PtInRect(&band, cur) != 0;
+                    bool keepOpen  = overStrip || overBand || g_scrubbing ||
+                                     g_artHover || g_pressed_btn != 0;
+
+                    if (keepOpen) {
                         g_cursorOffSinceMs = 0;
-                        ShowWindow(hwnd, SW_HIDE);
+                        if (g_slideT > 0.0 || g_autoHidden) g_slideDir = -1; // slide in
+                    } else {
+                        if (g_cursorOffSinceMs == 0) g_cursorOffSinceMs = now;
+                        // ~600ms grace so it does not vanish the instant the
+                        // cursor slips off the strip.
+                        if (now - g_cursorOffSinceMs > 600 && g_slideT < 1.0)
+                            g_slideDir = 1;                                  // slide out
+                    }
+
+                    // Advance the slide (~180ms end to end).
+                    if (g_slideDir != 0) {
+                        const double step = 16.0 / 180.0;
+                        g_slideT += g_slideDir * step;
+                        if (g_slideT <= 0.0) {
+                            g_slideT = 0.0; g_slideDir = 0; g_autoHidden = false;
+                        } else if (g_slideT >= 1.0) {
+                            g_slideT = 1.0; g_slideDir = 0; g_autoHidden = true;
+                        }
+                        auto_hide_apply_slide(hwnd);
+                        forcePaintOut = true;   // repaint at the new position
                     }
                 } else {
-                    g_cursorOffSinceMs = 0;   // not docked; never auto-hide
-                }
-            } else if (ah && g_autoHidden) {
-                // Reveal when the cursor touches the edge band where the strip
-                // was parked (its extent along the edge, a few px deep).
-                RECT band = g_autoHideRect;
-                int depth = (int)(4 * g_scale + 0.5); if (depth < 2) depth = 2;
-                switch (g_autoHideEdge) {
-                    case 0: band.right = band.left + depth; break;   // left
-                    case 1: band.bottom = band.top + depth; break;   // top
-                    case 2: band.left = band.right - depth; break;   // right
-                    case 3: band.top = band.bottom - depth; break;   // bottom
-                }
-                if (PtInRect(&band, cur)) {
-                    g_autoHidden = false; g_autoHideEdge = -1;
-                    ShowWindow(hwnd, SW_SHOWNA);
-                    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-                    // Layered window: must render on show, but paint() locks
-                    // st.lock which THIS block already holds - calling it here
-                    // deadlocks/crashes (same-thread relock of std::mutex, the
-                    // exact bug the needsRepaintOut flag exists to avoid). So
-                    // request the paint and let it run after the lock releases.
-                    forcePaintOut = true;
+                    g_cursorOffSinceMs = 0;   // not docked: never auto-hide
                 }
             }
         }
@@ -916,12 +969,12 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // the ceiling for a normal window; we can't permanently beat the taskbar,
         // but ~5x/sec keeps it visible in practice.
         static ULONGLONG s_lastTop = 0;
-        if (!g_hiddenForFullscreen && !g_hiddenByUser && !g_autoHidden && now - s_lastTop >= 200) {
+        if (!g_hiddenForFullscreen && !g_hiddenByUser && now - s_lastTop >= 200) {
             s_lastTop = now;
             SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
-        if (g_hiddenForFullscreen || g_hiddenByUser || g_autoHidden) return 0; // nothing to draw while hidden
+        if (g_hiddenForFullscreen || g_hiddenByUser) return 0; // nothing to draw while hidden
 
         // (2) While a seek is pending, keep showing the target until foobar's
         // reported position reaches it (within ~0.6s), then resume normal flow.
@@ -1230,9 +1283,13 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_WINDOWPOSCHANGING: {
         // Edge snapping - only while SHIFT is held. By default the strip moves
         // freely; hold Shift during a drag to snap flush to a monitor edge.
+        // With auto-hide enabled the strip MUST end up flush to the edge, or the
+        // reveal band lands inland where the cursor can't reach it. So snap
+        // automatically in that mode; otherwise keep the Shift-to-snap behaviour.
         WINDOWPOS* wp2 = (WINDOWPOS*)lp;
-        if (!(wp2->flags & SWP_NOMOVE) && (GetKeyState(VK_SHIFT) & 0x8000)) {
-            const int kSnap = S(12);
+        bool snapNow = (GetKeyState(VK_SHIFT) & 0x8000) != 0 || strip_load_auto_hide();
+        if (!(wp2->flags & SWP_NOMOVE) && snapNow) {
+            const int kSnap = strip_load_auto_hide() ? S(24) : S(12);
             int w = (wp2->cx != 0) ? wp2->cx : kWidth();
             int h = (wp2->cy != 0) ? wp2->cy : kHeight();
             RECT pr{ wp2->x, wp2->y, wp2->x + w, wp2->y + h };
@@ -1425,8 +1482,13 @@ static void CALLBACK MoveSizeEventProc(HWINEVENTHOOK, DWORD event, HWND,
         if (g_hwnd) {
             InvalidateRect(g_hwnd, nullptr, FALSE); // refresh once after
             RECT wr;
-            if (GetWindowRect(g_hwnd, &wr))
+            if (GetWindowRect(g_hwnd, &wr)) {
+                // A fresh drag re-establishes the docked position. Reset the
+                // slide so we never persist (or stay at) an off-screen rect.
+                g_slideDir = 0; g_slideT = 0.0; g_autoHidden = false;
+                g_autoHideShownRect = wr;
                 strip_save_position(wr.left, wr.top);
+            }
         }
     }
     else if (event == EVENT_SYSTEM_FOREGROUND) {
@@ -1567,7 +1629,14 @@ void strip_apply_visibility() {
     if (!g_hwnd) return;
     bool show = strip_load_show_strip();
     g_hiddenByUser = !show;
-    g_autoHidden = false; g_autoHideEdge = -1;   // master toggle overrides auto-hide
+    // Master toggle overrides auto-hide: clear the slide state and put the strip
+    // back at its docked position, so re-showing can never leave it off-screen.
+    if (g_autoHideEdge >= 0 && (g_autoHidden || g_slideT != 0.0)) {
+        g_slideT = 0.0;
+        auto_hide_apply_slide(g_hwnd);
+    }
+    g_autoHidden = false; g_autoHideEdge = -1;
+    g_slideDir = 0; g_slideT = 0.0;
     if (show) {
         ShowWindow(g_hwnd, SW_SHOWNA);
         SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
