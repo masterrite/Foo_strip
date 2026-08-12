@@ -352,12 +352,42 @@ std::wstring fmt_time(double secs) {
     return buf;
 }
 
-// True when a fullscreen app (game / video / presentation) is foreground. Uses
-// the same Shell signal the OS uses to suppress notifications during fullscreen.
+// True when a fullscreen app (game / video / presentation) covers the STRIP'S
+// monitor. Uses the Shell's notification signal as a cheap gate, then confirms
+// by looking for an actual fullscreen window on that monitor.
+//
+// Why not just check GetForegroundWindow(): the Shell signal is system-wide, but
+// the foreground window follows the user. With two monitors - video fullscreen on
+// #1, strip on #1, and you click any app on #2 - the foreground moves to #2, so a
+// foreground-based monitor test concludes "not fullscreen here" and the strip pops
+// up over the still-playing video. Enumerating instead makes the answer depend on
+// what actually covers the strip's monitor, not on what has focus.
+struct fs_scan_t { HMONITOR mon; RECT rc; bool found; };
+
+static BOOL CALLBACK fs_enum_proc(HWND hwnd, LPARAM lp) {
+    fs_scan_t* scan = (fs_scan_t*)lp;
+    if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
+    if (hwnd == g_hwnd || hwnd == g_artPopup) return TRUE;   // skip ourselves
+    // Ignore tool windows (other overlays/widgets) - they're not the fullscreen
+    // app we're trying to yield to.
+    LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    if (ex & WS_EX_TOOLWINDOW) return TRUE;
+    if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != scan->mon) return TRUE;
+
+    RECT wr{};
+    if (!GetWindowRect(hwnd, &wr)) return TRUE;
+    // Covers the whole monitor (allow a 1px rounding slack)?
+    if (wr.left <= scan->rc.left + 1 && wr.top <= scan->rc.top + 1 &&
+        wr.right >= scan->rc.right - 1 && wr.bottom >= scan->rc.bottom - 1) {
+        scan->found = true;
+        return FALSE;   // stop enumerating
+    }
+    return TRUE;
+}
+
 bool is_fullscreen_app_active() {
-    // Hide only for a real fullscreen app/presentation, reported by the Shell's
-    // notification state (does NOT fire for Start menu, taskbar, or flyouts),
-    // and only when that fullscreen context is on the strip's own monitor.
+    // Cheap gate first: the Shell's notification state (does NOT fire for the
+    // Start menu, taskbar, or flyouts). If nothing anywhere is fullscreen, done.
     QUERY_USER_NOTIFICATION_STATE state;
     if (SHQueryUserNotificationState(&state) != S_OK) return false;
     bool shellFullscreen = (state == QUNS_BUSY ||
@@ -365,12 +395,17 @@ bool is_fullscreen_app_active() {
                             state == QUNS_PRESENTATION_MODE);
     if (!shellFullscreen) return false;
 
-    HWND fg = GetForegroundWindow();
-    if (!fg) return false;
-    HMONITOR fgMon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+    // Confirm the fullscreen window is on the STRIP'S monitor, regardless of
+    // which window currently has focus.
     HMONITOR stripMon = g_hwnd ? MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST)
-                               : fgMon;
-    return fgMon == stripMon;
+                               : MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST);
+    if (!stripMon) return false;
+    MONITORINFO mi{ sizeof(mi) };
+    if (!GetMonitorInfo(stripMon, &mi)) return false;
+
+    fs_scan_t scan{ stripMon, mi.rcMonitor, false };
+    EnumWindows(fs_enum_proc, (LPARAM)&scan);
+    return scan.found;
 }
 
 // ----------------------------------------------------------------------------
