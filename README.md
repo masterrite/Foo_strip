@@ -12,7 +12,7 @@ through foobar's `playback_control` (no SMTC or bridge).
 
 This is a personal project to solve the problem that Windows 11 doesn't allow taskbar plugins anymore, which means Deskband Controls is no longer available. Since nobody seems to be interested in picking up where Eldarien left off, I asked Claude, Opus 4.8, to build me this for personal use. PRs welcome, especially for build/optimization improvements.
 
-> Independent, unofficial component for foobar2000. Not affiliated with or
+> Independent and unofficial component for foobar2000. Not affiliated with or
 > endorsed by the foobar2000 project. See [NOTICE.md](NOTICE.md).
 
 ## Features
@@ -20,6 +20,7 @@ This is a personal project to solve the problem that Windows 11 doesn't allow ta
 - Floating, draggable window
   - Hold down shift to snap to edges of your screen
   - Remembers its previous position upon restart
+  - Just don't drag by album art
 - Scales with DPI
 - Album art, title (continuous marquee when long), artist
   - Album art pop-up on hover, and its position depends on where the strip is (pops up below the strip if there are no space on top)
@@ -30,6 +31,8 @@ This is a personal project to solve the problem that Windows 11 doesn't allow ta
   - change basically everything but the album art thumbnail
 - Double-click album art to bring up/hide foobar window
 - "Toggle floating strip" under View menu and bindable to a button in Column UI
+- Snap to screen edge and auto-hide
+  - Toggleable in the settings, and leaves a sliver when it hides to show its position
 
 ## Caveat
 
