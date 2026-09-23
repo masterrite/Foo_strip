@@ -34,7 +34,7 @@ namespace {
 // ----------------------------------------------------------------------------
 DECLARE_COMPONENT_VERSION(
     "Floating Playback Strip",
-    "1.6.0",
+    "1.7.0",
     "A draggable floating strip with album art, title, transport, and a working "
     "seek bar. Reads playback directly in-process.\n");
 
@@ -571,6 +571,15 @@ static cfg_bool g_cfg_auto_hide(
 
 bool strip_load_auto_hide()          { return g_cfg_auto_hide; }
 void strip_save_auto_hide(bool s)    { g_cfg_auto_hide = s; }
+
+// Show a Stop button between Play and Next. Stopping fully releases the file
+// (useful before editing/deleting it). Opt-in; default off keeps the classic
+// three-button layout.
+static cfg_bool g_cfg_show_stop(
+    GUID{ 0x9a3f1c33, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x5e } }, false);
+
+bool strip_load_show_stop()          { return g_cfg_show_stop; }
+void strip_save_show_stop(bool s)    { g_cfg_show_stop = s; }
 
 // Master strip visibility. When false the whole strip window is hidden; the only
 // way back is this setting (the strip isn't there to click). Persists across
