@@ -54,6 +54,8 @@ bool strip_load_show_popup();           // show album-art hover/click popup
 void strip_save_show_popup(bool s);
 bool strip_load_auto_hide();            // auto-hide at screen edge
 void strip_save_auto_hide(bool s);
+bool strip_load_show_stop();            // show Stop button after Play
+void strip_save_show_stop(bool s);
 bool strip_load_show_strip();           // master strip visibility
 void strip_save_show_strip(bool s);
 void strip_apply_visibility();          // show/hide the strip per the setting

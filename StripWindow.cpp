@@ -324,7 +324,9 @@ double g_title_avail = 0.0;      // available px in the title area
 
 // Geometry of interactive regions, recomputed each paint.
 RECT g_rcPrev{}, g_rcPlay{}, g_rcNext{}, g_rcSeek{};
+RECT g_rcStop{};                     // optional Stop button (empty when hidden)
 RECT g_rcPrevHit{}, g_rcPlayHit{}, g_rcNextHit{};  // wider pressable areas
+RECT g_rcStopHit{};
 RECT g_rcVol{};                      // volume slider track rect (visual)
 RECT g_rcVolHit{};                   // volume slider hit-test rect (generous)
 RECT g_rcMute{};                     // speaker / mute-toggle icon rect
@@ -581,7 +583,9 @@ void paint(HWND hwnd) {
         int volWidth = showVol ? US(40) : 0;   // volume bar width (0 if hidden)
         int muteWidth = showVol ? US(iSpk) : 0;// speaker icon box (0 if hidden)
         int volGap = showVol ? US(10) : 0;
-        int rightControls = (btnSize * 3) + (spaceBtn * 2) + muteWidth + volWidth + volGap
+        bool showStop = strip_load_show_stop();
+        int nBtns = showStop ? 4 : 3;          // prev, play, [stop], next
+        int rightControls = (btnSize * nBtns) + (spaceBtn * (nBtns - 1)) + muteWidth + volWidth + volGap
                           + (showVol ? spaceVol : 0);
         int textW = W - tx - rightControls - kPad();
         if (textW < 10) textW = 10;
@@ -643,7 +647,8 @@ void paint(HWND hwnd) {
         int btnBot = bandMid + btnSize / 2;
 
         // Right edge, laid out right-to-left:
-        //   [ prev ][ play ][ next ]  [speaker] [volume bar]
+        //   [ prev ][ play ][ stop ][ next ]  [speaker] [volume bar]
+        // (Stop only when enabled in settings.)
         // When volume is hidden, the speaker + bar are skipped and the buttons
         // anchor directly to the right edge (reflow right, no empty gap).
         int volBarH = US(8);
@@ -665,7 +670,14 @@ void paint(HWND hwnd) {
             btnRight = W - kPad();
         }
         g_rcNext = { btnRight - btnSize, btnTop, btnRight, btnBot };
-        g_rcPlay = { g_rcNext.left - spaceBtn - btnSize, btnTop, g_rcNext.left - spaceBtn, btnBot };
+        int playRight = g_rcNext.left - spaceBtn;
+        if (showStop) {
+            g_rcStop = { g_rcNext.left - spaceBtn - btnSize, btnTop, g_rcNext.left - spaceBtn, btnBot };
+            playRight = g_rcStop.left - spaceBtn;
+        } else {
+            g_rcStop = { 0, 0, 0, 0 };
+        }
+        g_rcPlay = { playRight - btnSize, btnTop, playRight, btnBot };
         g_rcPrev = { g_rcPlay.left - spaceBtn - btnSize, btnTop, g_rcPlay.left - spaceBtn, btnBot };
 
         // Wider PRESSABLE areas: inflate each button's hit box horizontally by a
@@ -680,15 +692,27 @@ void paint(HWND hwnd) {
         // seek bar below or off the top edge.
         int hitTop = btnTop - vPad; if (hitTop < contentTop) hitTop = contentTop;
         int hitBot = btnBot + vPad; if (hitBot > contentTop + topRowH) hitBot = contentTop + topRowH;
-        LONG midPN = (g_rcPrev.right + g_rcPlay.left) / 2;   // prev|play boundary
-        LONG midNN = (g_rcPlay.right + g_rcNext.left) / 2;   // play|next boundary
-        LONG prevR = g_rcPrev.right + hitPad;  if (prevR > midPN) prevR = midPN;
-        LONG playL = g_rcPlay.left  - hitPad;  if (playL < midPN) playL = midPN;
-        LONG playR = g_rcPlay.right + hitPad;  if (playR > midNN) playR = midNN;
-        LONG nextL = g_rcNext.left  - hitPad;  if (nextL < midNN) nextL = midNN;
-        g_rcPrevHit = { g_rcPrev.left - hitPad, hitTop, prevR, hitBot };
-        g_rcPlayHit = { playL, hitTop, playR, hitBot };
-        g_rcNextHit = { nextL, hitTop, g_rcNext.right + hitPad, hitBot };
+        {
+            // Visible buttons, left to right, paired with their hit rects.
+            const RECT* vis[4]; RECT* hit[4]; int n = 0;
+            vis[n] = &g_rcPrev; hit[n++] = &g_rcPrevHit;
+            vis[n] = &g_rcPlay; hit[n++] = &g_rcPlayHit;
+            if (showStop) { vis[n] = &g_rcStop; hit[n++] = &g_rcStopHit; }
+            vis[n] = &g_rcNext; hit[n++] = &g_rcNextHit;
+            for (int i = 0; i < n; i++) {
+                LONG l = vis[i]->left - hitPad, r = vis[i]->right + hitPad;
+                if (i > 0) {                      // meet the left neighbour at the midpoint
+                    LONG mid = (vis[i - 1]->right + vis[i]->left) / 2;
+                    if (l < mid) l = mid;
+                }
+                if (i < n - 1) {                  // meet the right neighbour at the midpoint
+                    LONG mid = (vis[i]->right + vis[i + 1]->left) / 2;
+                    if (r > mid) r = mid;
+                }
+                *hit[i] = { l, hitTop, r, hitBot };
+            }
+            if (!showStop) g_rcStopHit = { 0, 0, 0, 0 };
+        }
 
         // (1) Button feedback: hover = subtle, pressed = stronger. The highlight
         // fills the full CLICKABLE (hit) area so the feedback matches exactly what
@@ -708,6 +732,7 @@ void paint(HWND hwnd) {
             drawBtnBg(g_rcPrevHit, 1);
             drawBtnBg(g_rcPlayHit, 2);
             drawBtnBg(g_rcNextHit, 3);
+            if (showStop) drawBtnBg(g_rcStopHit, 4);
         }
 
         // Modern outline glyphs: shapes are stroked, not filled. Stroke width
@@ -742,6 +767,13 @@ void paint(HWND hwnd) {
                 PointF tri[3] = { {(REAL)cx - GT(6), (REAL)cy - GT(9)}, {(REAL)cx + GT(9), (REAL)cy}, {(REAL)cx - GT(6), (REAL)cy + GT(9)} };
                 g.DrawPolygon(&pen, tri, 3);
             }
+        }
+        // stop [] (optional)
+        if (showStop) {
+            int cx = (g_rcStop.left + g_rcStop.right) / 2;
+            int cy = (g_rcStop.top + g_rcStop.bottom) / 2;
+            REAL half = GT(6.5);
+            g.DrawRectangle(&pen, (REAL)cx - half, (REAL)cy - half, half * 2, half * 2);
         }
         // next >|
         {
@@ -1180,10 +1212,12 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             double f = (double)(x - g_rcVol.left) / (g_rcVol.right - g_rcVol.left);
             strip_set_volume(min(1.0, max(0.0, f))); // fires on_volume_change
             InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (pt_in(g_rcPrevHit, x, y) || pt_in(g_rcPlayHit, x, y) || pt_in(g_rcNextHit, x, y)) {
+        } else if (pt_in(g_rcPrevHit, x, y) || pt_in(g_rcPlayHit, x, y) ||
+                   pt_in(g_rcStopHit, x, y) || pt_in(g_rcNextHit, x, y)) {
             // Record which button is pressed for visual feedback; fired on up.
             if (pt_in(g_rcPrevHit, x, y)) g_pressed_btn = 1;
             else if (pt_in(g_rcPlayHit, x, y)) g_pressed_btn = 2;
+            else if (pt_in(g_rcStopHit, x, y)) g_pressed_btn = 4;
             else g_pressed_btn = 3;
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (pt_in(g_rcArt, x, y)) {
@@ -1217,6 +1251,7 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             int h = 0;
             if (pt_in(g_rcPrevHit, x, y)) h = 1;
             else if (pt_in(g_rcPlayHit, x, y)) h = 2;
+            else if (pt_in(g_rcStopHit, x, y)) h = 4;
             else if (pt_in(g_rcNextHit, x, y)) h = 3;
             if (h != g_hover_btn) {
                 g_hover_btn = h;
@@ -1290,6 +1325,10 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 else pc->start(playback_control::track_command_play, false);
             } else if (g_pressed_btn == 3 && pt_in(g_rcNextHit, x, y)) {
                 pc->next();
+            } else if (g_pressed_btn == 4 && pt_in(g_rcStopHit, x, y)) {
+                // Full stop (not pause): foobar closes the file, so it's no
+                // longer locked and can be edited/moved/deleted.
+                pc->stop();
             }
             g_pressed_btn = 0;
             InvalidateRect(hwnd, nullptr, FALSE);

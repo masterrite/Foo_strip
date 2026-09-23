@@ -64,6 +64,7 @@ enum {
     ID_EDIT_SV = 1037, ID_SLIDER_SV = 1038,   // spacing buttons-to-volume
     ID_SHOW_POPUP = 1040,                     // show/hide album-art popup checkbox
     ID_AUTO_HIDE = 1041,                      // auto-hide at screen edge checkbox
+    ID_SHOW_STOP = 1042,                      // show Stop button checkbox
 };
 enum { kNumColors = 6 };   // 0 bg,1 text,2 buttons,3 fill,4 track,5 popup padding
 enum { kNumFonts = 3 };    // 0 title, 1 artist, 2 time
@@ -229,14 +230,23 @@ public:
 
             // Show album-art popup - shares the row with the volume toggle.
             m_savedShowPopup = m_origShowPopup = strip_load_show_popup();
-        m_savedAutoHide = m_origAutoHide = strip_load_auto_hide();
             m_showPopup = CreateWindowExW(0, L"BUTTON", L"Show album art popup",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                 LBL_X + dscale(190), y, dscale(190), dscale(22), m_content,
                 (HMENU)(INT_PTR)ID_SHOW_POPUP, inst, nullptr);
             SendMessageW(m_showPopup, BM_SETCHECK, m_savedShowPopup ? BST_CHECKED : BST_UNCHECKED, 0);
             if (m_bodyFont) SendMessageW(m_showPopup, WM_SETFONT, (WPARAM)m_bodyFont, TRUE);
-            track(0, m_showPopup); y += SU(30);
+            track(0, m_showPopup); y += SU(26);
+
+            // Show Stop button (placed between Play and Next on the strip).
+            m_savedShowStop = m_origShowStop = strip_load_show_stop();
+            m_showStop = CreateWindowExW(0, L"BUTTON", L"Show stop button",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                LBL_X, y, dscale(180), dscale(22), m_content,
+                (HMENU)(INT_PTR)ID_SHOW_STOP, inst, nullptr);
+            SendMessageW(m_showStop, BM_SETCHECK, m_savedShowStop ? BST_CHECKED : BST_UNCHECKED, 0);
+            if (m_bodyFont) SendMessageW(m_showStop, WM_SETFONT, (WPARAM)m_bodyFont, TRUE);
+            track(0, m_showStop); y += SU(30);
 
             // ---- Theme ----
             makeHeading(0, L"Theme", LBL_X, y, CW); y += HEAD;
@@ -386,6 +396,9 @@ public:
         if (strcmp(curFace.get_ptr(), m_origFace.get_ptr()) != 0) fontsChanged = true;
         if (strip_load_icon_size(0) != m_origIcon[0] || strip_load_icon_size(1) != m_origIcon[1]) fontsChanged = true;
         if (strip_load_show_volume() != m_origShowVol) fontsChanged = true;
+        if (strip_load_show_stop() != m_origShowStop) fontsChanged = true;
+        if (strip_load_show_popup() != m_origShowPopup) fontsChanged = true;
+        if (strip_load_auto_hide() != m_origAutoHide) fontsChanged = true;
         bool stripVisChanged = (strip_load_show_strip() != m_origShowStrip);
         if (strip_load_spacing(0) != m_origSpace[0] || strip_load_spacing(1) != m_origSpace[1]) fontsChanged = true;
         if (strip_load_width()  != m_origW || strip_load_height() != m_origH ||
@@ -406,6 +419,7 @@ public:
             strip_save_show_volume(m_origShowVol);
             strip_save_show_popup(m_origShowPopup);
             strip_save_auto_hide(m_origAutoHide);
+            strip_save_show_stop(m_origShowStop);
             strip_save_spacing(0, m_origSpace[0]);
             strip_save_spacing(1, m_origSpace[1]);
             strip_apply_settings();
@@ -435,6 +449,7 @@ public:
         if ((SendMessageW(m_showVol, BM_GETCHECK, 0, 0) == BST_CHECKED) != m_savedShowVol) fontsChanged = true;
         if ((SendMessageW(m_showPopup, BM_GETCHECK, 0, 0) == BST_CHECKED) != m_savedShowPopup) fontsChanged = true;
         if ((SendMessageW(m_autoHide, BM_GETCHECK, 0, 0) == BST_CHECKED) != m_savedAutoHide) fontsChanged = true;
+        if ((SendMessageW(m_showStop, BM_GETCHECK, 0, 0) == BST_CHECKED) != m_savedShowStop) fontsChanged = true;
         if ((SendMessageW(m_showStrip, BM_GETCHECK, 0, 0) == BST_CHECKED) != m_savedShowStrip) fontsChanged = true;
         if (readEdit(ID_EDIT_SB) != m_savedSpace[0] || readEdit(ID_EDIT_SV) != m_savedSpace[1]) fontsChanged = true;
         if (readEdit(ID_EDIT_W) != m_savedW || readEdit(ID_EDIT_H) != m_savedH ||
@@ -466,6 +481,7 @@ public:
         bool sp = SendMessageW(m_showPopup, BM_GETCHECK, 0, 0) == BST_CHECKED;
         strip_save_show_popup(sp);
         strip_save_auto_hide(SendMessageW(m_autoHide, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        strip_save_show_stop(SendMessageW(m_showStop, BM_GETCHECK, 0, 0) == BST_CHECKED);
         bool ss = SendMessageW(m_showStrip, BM_GETCHECK, 0, 0) == BST_CHECKED;
         strip_save_show_strip(ss);
         strip_save_spacing(0, readEdit(ID_EDIT_SB));
@@ -493,6 +509,7 @@ public:
         m_savedShowVol = m_origShowVol = strip_load_show_volume();
         m_savedShowPopup = m_origShowPopup = strip_load_show_popup();
         m_savedAutoHide = m_origAutoHide = strip_load_auto_hide();
+        m_savedShowStop = m_origShowStop = strip_load_show_stop();
         m_savedShowStrip = m_origShowStrip = strip_load_show_strip();
         m_savedSpace[0] = m_origSpace[0] = strip_load_spacing(0);
         m_savedSpace[1] = m_origSpace[1] = strip_load_spacing(1);
@@ -537,6 +554,7 @@ public:
         setBoth(ID_SLIDER_IT, ID_EDIT_IT, 20);
         setBoth(ID_SLIDER_IS, ID_EDIT_IS, 14);
         SendMessageW(m_showVol, BM_SETCHECK, BST_CHECKED, 0);   // default: shown
+        SendMessageW(m_showStop, BM_SETCHECK, BST_UNCHECKED, 0); // default: no Stop button
         SendMessageW(m_showStrip, BM_SETCHECK, BST_CHECKED, 0); // default: strip shown
         strip_save_show_strip(true);
         strip_apply_visibility();
@@ -937,13 +955,20 @@ private:
                 livePreview();
                 changed();
             }
-            // Show-album-art-popup toggled: save right away so the strip's hover
-            // behaviour updates live. No repaint needed (popup is hover-driven).
+            // Show-stop toggled: changes the transport layout, so live-preview
+            // (saves + re-lays-out the strip immediately).
+            else if (id == ID_SHOW_STOP && code == BN_CLICKED) {
+                livePreview();
+                changed();
+            }
+            // Auto-hide toggled.
             else if (id == ID_AUTO_HIDE && code == BN_CLICKED) {
                 // Save right away; the strip's timer picks the setting up live.
                 strip_save_auto_hide(SendMessageW(m_autoHide, BM_GETCHECK, 0, 0) == BST_CHECKED);
                 changed();
             }
+            // Show-album-art-popup toggled: save right away so the strip's hover
+            // behaviour updates live. No repaint needed (popup is hover-driven).
             else if (id == ID_SHOW_POPUP && code == BN_CLICKED) {
                 strip_save_show_popup(SendMessageW(m_showPopup, BM_GETCHECK, 0, 0) == BST_CHECKED);
                 changed();
@@ -1035,6 +1060,7 @@ private:
           if (is > 0) strip_save_icon_size(1, is); }
         strip_save_show_volume(SendMessageW(m_showVol, BM_GETCHECK, 0, 0) == BST_CHECKED);
         strip_save_show_popup(SendMessageW(m_showPopup, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        strip_save_show_stop(SendMessageW(m_showStop, BM_GETCHECK, 0, 0) == BST_CHECKED);
         { int sb = readEdit(ID_EDIT_SB), sv = readEdit(ID_EDIT_SV);
           strip_save_spacing(0, sb); strip_save_spacing(1, sv); }
         int mode = (int)SendMessageW(m_theme, CB_GETCURSEL, 0, 0);
@@ -1061,7 +1087,7 @@ private:
          m_sliderPA = nullptr, m_editPA = nullptr, m_tabs = nullptr,
          m_sliderBA = nullptr, m_editBA = nullptr,
          m_sliderIT = nullptr, m_editIT = nullptr, m_sliderIS = nullptr, m_editIS = nullptr,
-         m_showVol = nullptr, m_showPopup = nullptr, m_autoHide = nullptr,
+         m_showVol = nullptr, m_showPopup = nullptr, m_autoHide = nullptr, m_showStop = nullptr,
          m_sliderSB = nullptr, m_editSB = nullptr, m_sliderSV = nullptr, m_editSV = nullptr,
          m_showStrip = nullptr;
     std::vector<HWND> m_tabCtrls[3];        // controls per tab (General/Size/Text)
@@ -1092,6 +1118,7 @@ private:
     bool m_savedShowVol = true, m_origShowVol = true;        // volume visible?
     bool m_savedShowPopup = true, m_origShowPopup = true;    // art popup visible?
     bool m_savedAutoHide = false, m_origAutoHide = false;    // auto-hide at edge?
+    bool m_savedShowStop = false, m_origShowStop = false;    // Stop button shown?
     bool m_savedShowStrip = true, m_origShowStrip = true;    // whole strip visible?
     int m_savedSpace[2] = {0, 4}, m_origSpace[2] = {0, 4};   // btn gap / volume gap
     int m_savedMode = 1, m_origMode = 1;   // theme mode baseline / original
