@@ -6,11 +6,13 @@
 </p>
 
 A standalone, draggable, always-on-top playback strip for foobar2000 on
-Windows, inspired by Deskband Controls. Album art, scrolling title/artist, transport controls, and a working
+Windows, inspired by [Deskband Controls](https://github.com/Eldarien/DeskbandControls). Album art, scrolling title/artist, transport controls, and a working
 seek bar — floating over your desktop, independent of foobar's own window. Reads position/length and seeks **directly**
 through foobar's `playback_control` (no SMTC or bridge).
 
 This is a personal project to solve the problem that Windows 11 doesn't allow taskbar plugins anymore, which means Deskband Controls is no longer available. Since nobody seems to be interested in picking up where Eldarien left off, I asked Claude, Opus 4.8, to build me this for personal use. PRs welcome, especially for build/optimization improvements.
+
+Forum thread: [https://hydrogenaudio.org/index.php/topic,129649.75.html](https://hydrogenaudio.org/index.php/topic,129649.75.html)
 
 > Independent and unofficial component for foobar2000. Not affiliated with or
 > endorsed by the foobar2000 project. See [NOTICE.md](NOTICE.md).
