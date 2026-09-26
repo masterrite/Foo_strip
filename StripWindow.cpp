@@ -7,10 +7,13 @@
 #include "strip_shared.h"
 #include <windowsx.h>
 #include <shellapi.h>   // SHQueryUserNotificationState (fullscreen detection)
+#include <dwmapi.h>     // DwmGetWindowAttribute (skip cloaked windows)
+#pragma comment(lib, "dwmapi.lib")
 #include <gdiplus.h>
 #include <string>
 #include <mutex>
 #include <cmath>
+#include <cstring>     // memset (back-buffer clear)
 
 using namespace Gdiplus;
 
@@ -144,6 +147,11 @@ double g_slideT = 0.0;                // 0.0 = fully shown, 1.0 = fully hidden
 // A sliver stays on-screen while hidden so the strip is easy to grab/reveal.
 inline int auto_hide_peek() { int p = (int)(3 * g_scale + 0.5); return p < 2 ? 2 : p; }
 
+// True while auto_hide_apply_slide() is moving the window, so the edge-snap in
+// WM_WINDOWPOSCHANGING leaves those programmatic moves alone (otherwise the
+// first frames of a slide, still within snap range, were yanked back flush).
+bool g_inSlideMove = false;
+
 // Offset the docked rect by the current slide progress along its edge.
 static void auto_hide_apply_slide(HWND hwnd) {
     if (g_autoHideEdge < 0) return;
@@ -157,8 +165,24 @@ static void auto_hide_apply_slide(HWND hwnd) {
         case 2: dx =  (int)((w - peek) * g_slideT); break;   // slide right
         case 3: dy =  (int)((h - peek) * g_slideT); break;   // slide down
     }
+    g_inSlideMove = true;
     SetWindowPos(hwnd, HWND_TOPMOST, r.left + dx, r.top + dy, 0, 0,
                  SWP_NOSIZE | SWP_NOACTIVATE);
+    g_inSlideMove = false;
+}
+
+// Move rect r (keeping its size) so it lies fully inside the nearest monitor.
+static void clamp_rect_to_monitor(RECT& r) {
+    HMONITOR mon = MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{ sizeof(mi) };
+    if (!GetMonitorInfo(mon, &mi)) return;
+    const RECT& m = mi.rcMonitor;
+    int w = r.right - r.left, h = r.bottom - r.top;
+    if (r.right > m.right)   { r.left = m.right - w;  }
+    if (r.bottom > m.bottom) { r.top  = m.bottom - h; }
+    if (r.left < m.left)     { r.left = m.left; }
+    if (r.top < m.top)       { r.top  = m.top;  }
+    r.right = r.left + w; r.bottom = r.top + h;
 }
 
 // If the strip's window rect touches (within tol px of) an edge of its monitor,
@@ -171,12 +195,48 @@ static int strip_docked_edge(HWND hwnd, int tol) {
     const RECT& m = mi.rcMonitor;
     int dl = r.left - m.left, dt = r.top - m.top,
         dr = m.right - r.right, db = m.bottom - r.bottom;
+    // An edge only counts if it's a TRUE outer screen edge. If another monitor
+    // continues past it (side-by-side setups), "sliding off" would just push the
+    // strip onto the neighbouring monitor, so that edge is not dockable.
+    // Probe both ends and the middle of the strip's span along that edge, so
+    // a strip that straddles the end of a neighbouring (offset) monitor isn't
+    // docked to an edge it would partly slide onto.
+    auto none = [](int px, int py) {
+        POINT p{ px, py };
+        return MonitorFromPoint(p, MONITOR_DEFAULTTONULL) == nullptr;
+    };
+    int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+    auto outerV = [&](int px) {    // left/right edge: probe down the strip
+        return none(px, r.top) && none(px, cy) && none(px, r.bottom - 1);
+    };
+    auto outerH = [&](int py) {    // top/bottom edge: probe across the strip
+        return none(r.left, py) && none(cx, py) && none(r.right - 1, py);
+    };
     int best = -1, bestDist = tol + 1;
-    if (dl >= 0 && dl < bestDist) { best = 0; bestDist = dl; }
-    if (dt >= 0 && dt < bestDist) { best = 1; bestDist = dt; }
-    if (dr >= 0 && dr < bestDist) { best = 2; bestDist = dr; }
-    if (db >= 0 && db < bestDist) { best = 3; bestDist = db; }
+    if (dl >= 0 && dl < bestDist && outerV(m.left - 1))   { best = 0; bestDist = dl; }
+    if (dt >= 0 && dt < bestDist && outerH(m.top - 1))    { best = 1; bestDist = dt; }
+    if (dr >= 0 && dr < bestDist && outerV(m.right))      { best = 2; bestDist = dr; }
+    if (db >= 0 && db < bestDist && outerH(m.bottom))     { best = 3; bestDist = db; }
     return best;
+}
+
+// Abandon any auto-hide slide and put the strip back at its docked spot, sized
+// to the CURRENT kWidth/kHeight and clamped onto a monitor that exists. Used when
+// the display layout / DPI / work area changes underneath a hidden strip, where
+// the remembered docked rect may now be off-screen or the wrong size.
+static void auto_hide_cancel_and_clamp(HWND hwnd) {
+    if (g_autoHideEdge < 0 || (!g_autoHidden && g_slideT == 0.0 && g_slideDir == 0))
+        return;
+    RECT r = g_autoHideShownRect;
+    r.right = r.left + kWidth(); r.bottom = r.top + kHeight();
+    clamp_rect_to_monitor(r);
+    g_autoHidden = false; g_slideDir = 0; g_slideT = 0.0;
+    g_autoHideEdge = -1;            // timer re-docks from the new rect
+    g_inSlideMove = true;
+    SetWindowPos(hwnd, HWND_TOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                 SWP_NOACTIVATE);
+    g_inSlideMove = false;
+    strip_save_position(r.left, r.top);
 }
 
 // Interaction state
@@ -222,9 +282,7 @@ void hide_art_popup();
 struct Theme {
     Gdiplus::Color bg;          // strip background
     Gdiplus::Color artPh;       // album-art placeholder
-    Gdiplus::Color title;       // title text
-    Gdiplus::Color artist;      // artist subtitle text
-    Gdiplus::Color time;        // seek time text (brighter than artist for contrast)
+    Gdiplus::Color title;       // all text: title, artist and time
     Gdiplus::Color icon;        // transport glyphs
     Gdiplus::Color groove;      // seek track (unfilled)
     Gdiplus::Color accent;      // seek fill
@@ -237,9 +295,7 @@ struct Theme {
 const Theme kDarkTheme = {
     Gdiplus::Color(230, 24, 26, 31),   // bg (slightly translucent dark)
     Gdiplus::Color(255, 40, 44, 52),   // artPh
-    Gdiplus::Color(255, 242, 244, 248),// title
-    Gdiplus::Color(255, 138, 147, 162),// artist
-    Gdiplus::Color(255, 196, 202, 212),// time (brighter than artist for contrast)
+    Gdiplus::Color(255, 242, 244, 248),// title (all text)
     Gdiplus::Color(255, 212, 218, 227),// icon
     Gdiplus::Color(255, 60, 64, 72),   // groove
     Gdiplus::Color(255, 91, 167, 245), // accent
@@ -252,9 +308,7 @@ const Theme kDarkTheme = {
 const Theme kLightTheme = {
     Gdiplus::Color(255, 238, 238, 238),// bg (matches Win11 taskbar)
     Gdiplus::Color(255, 210, 214, 220),// artPh
-    Gdiplus::Color(255, 28, 32, 38),   // title (dark text)
-    Gdiplus::Color(255, 96, 104, 116), // artist
-    Gdiplus::Color(255, 60, 66, 78),   // time (darker than artist for contrast)
+    Gdiplus::Color(255, 28, 32, 38),   // title (all text, dark)
     Gdiplus::Color(255, 64, 70, 80),   // icon (dark glyphs)
     Gdiplus::Color(255, 198, 202, 208),// groove
     Gdiplus::Color(255, 38, 130, 222), // accent (slightly deeper blue for contrast)
@@ -268,7 +322,7 @@ bool g_darkMode = true;                 // legacy; superseded by theme mode
 
 // Read the Windows app theme from the registry. Returns true if the system is
 // in DARK mode. Used for theme mode 2 (Follow system).
-static bool system_is_dark() {
+static bool system_is_dark_uncached() {
     DWORD val = 1, sz = sizeof(val);
     // AppsUseLightTheme = 0 means dark apps. Default to light (val=1) if missing.
     if (RegGetValueW(HKEY_CURRENT_USER,
@@ -276,6 +330,16 @@ static bool system_is_dark() {
             L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &val, &sz) != ERROR_SUCCESS)
         return false;
     return val == 0;
+}
+// theme() is called a dozen+ times per paint at up to 60fps; hitting the
+// registry every call was ~900 reads/sec. The OS theme changes rarely, so
+// re-read it at most once a second.
+static bool system_is_dark() {
+    static bool s_dark = false;
+    static ULONGLONG s_at = 0;
+    ULONGLONG now = GetTickCount64();
+    if (s_at == 0 || now - s_at >= 1000) { s_dark = system_is_dark_uncached(); s_at = now; }
+    return s_dark;
 }
 
 // The live theme. Rebuilt per call from the configured theme mode:
@@ -296,8 +360,6 @@ const Theme& theme() {
     };
     s_custom.bg     = C(strip_load_color(0));
     s_custom.title  = C(strip_load_color(1));
-    s_custom.artist = C(strip_load_color(1));
-    s_custom.time   = C(strip_load_color(1));
     s_custom.icon   = C(strip_load_color(2));
     s_custom.accent = C(strip_load_color(3));
     s_custom.groove = C(strip_load_color(4));
@@ -374,7 +436,25 @@ static BOOL CALLBACK fs_enum_proc(HWND hwnd, LPARAM lp) {
     // app we're trying to yield to.
     LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
     if (ex & WS_EX_TOOLWINDOW) return TRUE;
+    // The desktop itself (Progman / WorkerW) covers every monitor and would
+    // count as "fullscreen" as soon as the Shell reports a fullscreen app on
+    // ANY monitor - hiding the strip on the wrong screen.
+    if (hwnd == GetShellWindow()) return TRUE;
+    wchar_t cls[32] = {};
+    if (GetClassNameW(hwnd, cls, 32) &&
+        (wcscmp(cls, L"Progman") == 0 || wcscmp(cls, L"WorkerW") == 0)) return TRUE;
+    // Cloaked windows (suspended UWP apps, other virtual desktops) report as
+    // visible but aren't on screen.
+    DWORD cloaked = 0;
+    if (SUCCEEDED(DwmGetWindowAttribute(hwnd, 14 /*DWMWA_CLOAKED*/, &cloaked, sizeof(cloaked))) &&
+        cloaked) return TRUE;
     if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != scan->mon) return TRUE;
+
+    // A maximized normal window overhangs the monitor by its invisible resize
+    // borders, so it would pass the "covers the monitor" test below. Real
+    // fullscreen apps drop the caption.
+    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    if (IsZoomed(hwnd) && (style & WS_CAPTION) == WS_CAPTION) return TRUE;
 
     RECT wr{};
     if (!GetWindowRect(hwnd, &wr)) return TRUE;
@@ -410,9 +490,62 @@ bool is_fullscreen_app_active() {
     return scan.found;
 }
 
+// Fit an image of iw x ih inside the box (x, y, w, h) keeping its aspect ratio,
+// centered. Non-square covers (wide stream thumbnails, DVD-style art) were
+// being stretched to fill the square; now they're letterboxed.
+static Gdiplus::RectF fit_image_rect(UINT iw, UINT ih, float x, float y, float w, float h) {
+    if (iw == 0 || ih == 0 || w <= 0 || h <= 0) return Gdiplus::RectF(x, y, w, h);
+    float s = w / (float)iw;
+    if ((float)ih * s > h) s = h / (float)ih;
+    float dw = (float)iw * s, dh = (float)ih * s;
+    return Gdiplus::RectF(x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+}
+
 // ----------------------------------------------------------------------------
 // Painting
 // ----------------------------------------------------------------------------
+// Back buffer for the strip, kept between frames. Creating a DC + a 32-bit DIB
+// on every repaint (up to 60x/sec) was pure allocation churn; now it's made once
+// and only re-made when the strip's pixel size changes (resize / DPI change).
+HDC     g_backDC   = nullptr;
+HBITMAP g_backDib  = nullptr;
+HBITMAP g_backOld  = nullptr;
+void*   g_backBits = nullptr;
+int     g_backW = 0, g_backH = 0;
+
+static void free_back_buffer() {
+    if (g_backDC) {
+        if (g_backOld) SelectObject(g_backDC, g_backOld);
+        DeleteDC(g_backDC);
+    }
+    if (g_backDib) DeleteObject(g_backDib);
+    g_backDC = nullptr; g_backDib = nullptr; g_backOld = nullptr;
+    g_backBits = nullptr; g_backW = g_backH = 0;
+}
+
+// Make sure the back buffer exists at W x H. Returns false if GDI is out of
+// resources (the frame is skipped; we try again next tick).
+static bool ensure_back_buffer(HDC screen, int W, int H) {
+    if (g_backDC && g_backW == W && g_backH == H) return true;
+    free_back_buffer();
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = W;
+    bi.bmiHeader.biHeight = -H;          // top-down
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP dib = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!dib || !bits) { if (dib) DeleteObject(dib); return false; }
+    HDC mem = CreateCompatibleDC(screen);
+    if (!mem) { DeleteObject(dib); return false; }
+    g_backOld = (HBITMAP)SelectObject(mem, dib);
+    g_backDC = mem; g_backDib = dib; g_backBits = bits;
+    g_backW = W; g_backH = H;
+    return true;
+}
+
 void paint(HWND hwnd) {
     RECT rc; GetWindowRect(hwnd, &rc);
     int W = rc.right - rc.left, H = rc.bottom - rc.top;
@@ -424,18 +557,16 @@ void paint(HWND hwnd) {
     // the background alpha setting comes next. Content (art/text/buttons/bars) is
     // always opaque.
     HDC screen = GetDC(nullptr);
-    HDC mem = CreateCompatibleDC(screen);
-
-    BITMAPINFO bi{};
-    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth = W;
-    bi.bmiHeader.biHeight = -H;          // top-down
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-    void* bits = nullptr;
-    HBITMAP dib = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    HBITMAP old = (HBITMAP)SelectObject(mem, dib);
+    if (!ensure_back_buffer(screen, W, H)) {   // out of GDI resources: skip frame
+        ReleaseDC(nullptr, screen);
+        return;
+    }
+    HDC mem = g_backDC;
+    void* bits = g_backBits;
+    // The buffer is reused, so it still holds last frame's pixels. Wipe it to
+    // fully transparent so the translucent background doesn't blend on top of
+    // the previous frame.
+    memset(bits, 0, (size_t)W * H * 4);
 
     // Draw through a GDI+ Bitmap that wraps the DIB memory as PREMULTIPLIED ARGB.
     // Going through the bitmap (not the HDC) is what makes GDI+ manage the alpha
@@ -475,7 +606,8 @@ void paint(HWND hwnd) {
         artGen = st.artGen;
         double pos = g_scrubbing ? g_scrub_preview * st.length : g_interp_position;
         if (st.length > 0) frac = min(1.0, max(0.0, pos / st.length));
-        timeStr = fmt_time(pos) + L" / " + fmt_time(st.length);
+        timeStr = (st.length > 0) ? fmt_time(pos) + L" / " + fmt_time(st.length)
+                                  : fmt_time(pos);   // streams: no length
 
         // ====================================================================
         // PROPORTIONAL LAYOUT (scales coherently with height at any DPI).
@@ -519,6 +651,25 @@ void paint(HWND hwnd) {
         if (wScale < 1.0) wScale = 1.0;
         auto WS = [&](double n) { return (int)(n * g_scale * wScale + 0.5); };
 
+        // A tall-but-narrow strip grows buttons/fonts with height (u) until the
+        // right-hand controls no longer fit and slide over the album art. Cap u
+        // so the controls plus a minimum title area always fit the width.
+        {
+            int nb = strip_load_show_stop() ? 4 : 3;
+            bool sv = strip_load_show_volume();
+            int fixedPx = WS(strip_load_spacing(0)) * (nb - 1) +
+                          (sv ? WS(strip_load_spacing(1)) : 0);
+            double perU = g_scale * (strip_load_icon_size(0) * nb +
+                          (sv ? (40 + strip_load_icon_size(1) + 10) : 0));
+            int txFit = inset + contentH + kPad();
+            double avail = W - txFit - kPad() - fixedPx - 60 * g_scale;
+            if (perU > 0 && u * perU > avail) {
+                double uFit = avail / perU;
+                if (uFit < 1.0) uFit = 1.0;
+                if (uFit < u) u = uFit;
+            }
+        }
+
         // Album art: full-content-height square at the left.
         int artSize = contentH;
         int ax = inset;
@@ -533,12 +684,20 @@ void paint(HWND hwnd) {
                 invalidate_art_thumb();
                 if (artSize > 0) {
                     g_artThumb = new Gdiplus::Bitmap(artSize, artSize, PixelFormat32bppPARGB);
-                    Gdiplus::Graphics tg(g_artThumb);
-                    tg.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-                    tg.SetPixelOffsetMode(PixelOffsetModeHalf);
-                    tg.DrawImage(art, 0, 0, artSize, artSize);
-                    g_artThumbGen = artGen;
-                    g_artThumbSize = artSize;
+                    if (g_artThumb && g_artThumb->GetLastStatus() != Gdiplus::Ok) {
+                        delete g_artThumb; g_artThumb = nullptr;   // out of memory
+                    }
+                    if (g_artThumb) {
+                        Gdiplus::Graphics tg(g_artThumb);
+                        tg.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+                        tg.SetPixelOffsetMode(PixelOffsetModeHalf);
+                        // Letterboxed: the unused part of the square stays
+                        // transparent, so the strip background shows there.
+                        tg.DrawImage(art, fit_image_rect(art->GetWidth(), art->GetHeight(),
+                                                         0, 0, (float)artSize, (float)artSize));
+                        g_artThumbGen = artGen;
+                        g_artThumbSize = artSize;
+                    }
                 }
             }
             if (g_artThumb)
@@ -873,28 +1032,32 @@ void paint(HWND hwnd) {
     // MORE transparent than the background. We raise alpha (and the premultiplied
     // RGB proportionally so the visible color is preserved) up to bgA. Content
     // areas (already alpha 255) are untouched.
+    //
+    // Almost every pixel already has alpha >= bgA (the background fill covers
+    // the whole strip), so the scan reads one 32-bit word per pixel and only
+    // does arithmetic on the rare edge pixels that need it. Fully transparent
+    // pixels get a precomputed background pixel instead of per-pixel math.
     g.Flush(FlushIntentionSync);
-    if (bits && bgA < 255) {
-        BYTE* px = (BYTE*)bits;            // BGRA, premultiplied, top-down
-        int count = W * H;
-        for (int i = 0; i < count; i++, px += 4) {
-            BYTE a = px[3];
-            if (a < bgA) {
-                // Raise alpha to bgA. Rescale premultiplied BGR by bgA/a so the
-                // un-premultiplied color stays the same (avoids darkening edges).
-                if (a == 0) {
-                    // Fully transparent: this is true background gap - set to the
-                    // background color at bgA (premultiplied).
-                    px[0] = (BYTE)(base.GetB() * bgA / 255);
-                    px[1] = (BYTE)(base.GetG() * bgA / 255);
-                    px[2] = (BYTE)(base.GetR() * bgA / 255);
-                } else {
-                    px[0] = (BYTE)min(255, px[0] * bgA / a);
-                    px[1] = (BYTE)min(255, px[1] * bgA / a);
-                    px[2] = (BYTE)min(255, px[2] * bgA / a);
-                }
-                px[3] = (BYTE)bgA;
-            }
+    if (bgA < 255) {
+        const UINT32 bgPixel =
+            ((UINT32)bgA << 24) |
+            ((UINT32)(base.GetR() * bgA / 255) << 16) |
+            ((UINT32)(base.GetG() * bgA / 255) << 8) |
+             (UINT32)(base.GetB() * bgA / 255);
+        UINT32* px = (UINT32*)bits;        // BGRA, premultiplied, top-down
+        const UINT32* end = px + (size_t)W * H;
+        for (; px < end; ++px) {
+            UINT32 v = *px;
+            UINT32 a = v >> 24;
+            if (a >= (UINT32)bgA) continue;          // the common case
+            if (a == 0) { *px = bgPixel; continue; } // background gap
+            // Raise alpha to bgA and rescale premultiplied BGR by bgA/a so the
+            // un-premultiplied color stays the same (avoids darkening edges).
+            UINT32 b = (v & 0xFF) * bgA / a;
+            UINT32 gg = ((v >> 8) & 0xFF) * bgA / a;
+            UINT32 r = ((v >> 16) & 0xFF) * bgA / a;
+            if (b > 255) b = 255; if (gg > 255) gg = 255; if (r > 255) r = 255;
+            *px = ((UINT32)bgA << 24) | (r << 16) | (gg << 8) | b;
         }
     }
 
@@ -904,11 +1067,7 @@ void paint(HWND hwnd) {
     POINT ptDst{ rc.left, rc.top };
     BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
     UpdateLayeredWindow(hwnd, screen, &ptDst, &sz, mem, &ptSrc, 0, &bf, ULW_ALPHA);
-
-    SelectObject(mem, old);
-    DeleteObject(dib);
-    DeleteDC(mem);
-    ReleaseDC(nullptr, screen);
+    ReleaseDC(nullptr, screen);          // back buffer is kept for the next frame
 }
 
 // ----------------------------------------------------------------------------
@@ -920,9 +1079,13 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         auto& st = strip_get_state();
         bool needsRepaintOut = false;
         bool forcePaintOut = false;   // auto-hide reveal: paint after lock release
-        {
-        std::lock_guard<std::mutex> guard(st.lock);
         ULONGLONG now = GetTickCount64();
+
+        // Window management (fullscreen hide, auto-hide slide, topmost) runs
+        // BEFORE taking st.lock. None of it touches StripState, and ShowWindow /
+        // SetWindowPos can synchronously dispatch messages back into StripProc
+        // (e.g. WM_DPICHANGED -> paint), which would re-lock st.lock on this same
+        // thread and throw "resource deadlock would occur".
 
         // Fullscreen suppression: hide the strip while a game/video is fronted.
         // Checked ~once per second (state changes slowly; the call isn't free).
@@ -932,6 +1095,7 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             bool fs = is_fullscreen_app_active();
             if (fs && !g_hiddenForFullscreen) {
                 g_hiddenForFullscreen = true;
+                if (g_artHover) { g_artHover = false; hide_art_popup(); }
                 ShowWindow(hwnd, SW_HIDE);
             } else if (!fs && g_hiddenForFullscreen) {
                 g_hiddenForFullscreen = false;
@@ -997,7 +1161,7 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     bool overStrip = PtInRect(&wr, cur) != 0;
                     bool overBand  = PtInRect(&band, cur) != 0;
                     bool keepOpen  = overStrip || overBand || g_scrubbing ||
-                                     g_artHover || g_pressed_btn != 0;
+                                     g_volScrubbing || g_artHover || g_pressed_btn != 0;
 
                     if (keepOpen) {
                         g_cursorOffSinceMs = 0;
@@ -1042,6 +1206,9 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
         if (g_hiddenForFullscreen || g_hiddenByUser) return 0; // nothing to draw while hidden
+
+        {
+        std::lock_guard<std::mutex> guard(st.lock);
 
         // (2) While a seek is pending, keep showing the target until foobar's
         // reported position reaches it (within ~0.6s), then resume normal flow.
@@ -1151,10 +1318,14 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         //   - minimized               -> restore + bring to front
         //   - visible but not front   -> bring to front
         //   - already the front window -> minimize
-        // Elsewhere on the strip, double-click does nothing special (the first
-        // click already did its action).
+        // Elsewhere on the strip the second click of a double-click is treated
+        // as an ordinary press. CS_DBLCLKS turns it into WM_LBUTTONDBLCLK instead
+        // of WM_LBUTTONDOWN, so without this, fast double-clicks on Next/Prev/
+        // the seek bar silently lost every second click.
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
-        if (pt_in(g_rcArt, x, y)) {
+        if (g_autoHidden || g_slideT > 0.0 || !pt_in(g_rcArt, x, y))
+            return StripProc(hwnd, WM_LBUTTONDOWN, wp, lp);
+        {
             HWND fb = core_api::get_main_window();
             if (fb) {
                 if (!IsIconic(fb) && GetForegroundWindow() == fb) {
@@ -1197,9 +1368,23 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_LBUTTONDOWN: {
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+        // While auto-hidden (or mid-slide) a click on the sliver just calls the
+        // strip out. Controls whose hit boxes overhang the visible sliver must
+        // not fire, and starting a drag here would freeze the slide half-way.
+        if (g_autoHidden || g_slideT > 0.0) {
+            g_slideDir = -1; g_cursorOffSinceMs = 0;
+            return 0;
+        }
         SetCapture(hwnd);
 
+        bool canSeek;
+        { auto& st = strip_get_state();
+          std::lock_guard<std::mutex> g(st.lock); canSeek = st.canSeek && st.length > 0; }
+
         if (pt_in(g_rcSeek, x, y)) {
+            // Streams / unseekable tracks: ignore. (Scrubbing them used to set a
+            // pending-seek hold that never resolved, freezing the thumb.)
+            if (!canSeek) { ReleaseCapture(); return 0; }
             g_scrubbing = true;
             double f = (double)(x - g_rcSeek.left) / (g_rcSeek.right - g_rcSeek.left);
             g_scrub_preview = min(1.0, max(0.0, f));
@@ -1291,7 +1476,8 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_LBUTTONUP: {
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
-        ReleaseCapture();
+        // ReleaseCapture() is at the END: it sends WM_CAPTURECHANGED, which
+        // cancels any in-progress scrub/press, so the state must be consumed first.
 
         if (g_volScrubbing) {
             g_volScrubbing = false;
@@ -1333,8 +1519,22 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_pressed_btn = 0;
             InvalidateRect(hwnd, nullptr, FALSE);
         }
+        ReleaseCapture();
         return 0;
     }
+
+    case WM_CAPTURECHANGED:
+        // Capture taken away mid-gesture (Alt+Tab, a popup, UAC, etc.): we'll
+        // never see the button-up, so drop the gesture instead of leaving the
+        // scrubber / volume / pressed button stuck "held".
+        if ((HWND)lp != hwnd &&
+            (g_scrubbing || g_volScrubbing || g_pressed_btn != 0)) {
+            g_scrubbing = false;
+            g_volScrubbing = false;
+            g_pressed_btn = 0;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
 
     case WM_MOUSELEAVE:
         g_tracking_leave = false;
@@ -1362,7 +1562,7 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // automatically in that mode; otherwise keep the Shift-to-snap behaviour.
         WINDOWPOS* wp2 = (WINDOWPOS*)lp;
         bool snapNow = (GetKeyState(VK_SHIFT) & 0x8000) != 0 || strip_load_auto_hide();
-        if (!(wp2->flags & SWP_NOMOVE) && snapNow) {
+        if (!(wp2->flags & SWP_NOMOVE) && snapNow && !g_inSlideMove) {
             const int kSnap = strip_load_auto_hide() ? S(24) : S(12);
             int w = (wp2->cx != 0) ? wp2->cx : kWidth();
             int h = (wp2->cy != 0) ? wp2->cy : kHeight();
@@ -1387,14 +1587,46 @@ LRESULT CALLBACK StripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // Fired when the strip is dragged to a monitor with a different scale.
         // wParam high word = new DPI. Update g_scale and resize to match so the
         // strip stays the right physical size (text/buttons scale correctly).
+        //
+        // Use the position Windows suggests (lParam). Keeping the old top-left
+        // while the size changes can put most of the strip back over the
+        // previous monitor, which flips the DPI back again - the strip would
+        // flicker between sizes while being dragged across monitors.
         UINT newDpi = HIWORD(wp);
         if (set_scale_from_dpi(newDpi)) {
-            SetWindowPos(hwnd, nullptr, 0, 0, kWidth(), kHeight(),
-                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            if (g_autoHidden || g_slideT != 0.0 || g_slideDir != 0) {
+                auto_hide_cancel_and_clamp(hwnd);   // resizes + re-places
+            } else {
+                const RECT* sug = (const RECT*)lp;
+                g_inSlideMove = true;               // programmatic: skip snap
+                SetWindowPos(hwnd, nullptr, sug->left, sug->top, kWidth(), kHeight(),
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+                g_inSlideMove = false;
+            }
             paint(hwnd);
         }
         return 0;
     }
+
+    case WM_DISPLAYCHANGE:
+        // Resolution / monitor layout changed: a hidden strip's remembered
+        // docked rect may no longer be on any screen. Bring it back.
+        auto_hide_cancel_and_clamp(hwnd);
+        if (!g_autoHidden) {
+            RECT r{}; GetWindowRect(hwnd, &r);
+            RECT c = r; clamp_rect_to_monitor(c);
+            if (c.left != r.left || c.top != r.top) {
+                SetWindowPos(hwnd, nullptr, c.left, c.top, 0, 0,
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                strip_save_position(c.left, c.top);
+            }
+        }
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+
+    case WM_SETTINGCHANGE:
+        if (wp == SPI_SETWORKAREA) auto_hide_cancel_and_clamp(hwnd);  // taskbar moved
+        return DefWindowProc(hwnd, msg, wp, lp);
 
     case WM_PAINT: {
         // paint() renders via UpdateLayeredWindow (no BeginPaint/EndPaint), so we
@@ -1438,6 +1670,12 @@ void paint_art_popup_layered() {
     bi.bmiHeader.biCompression = BI_RGB;
     void* bits = nullptr;
     HBITMAP dib = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!dib || !bits) {             // out of GDI resources: skip this frame
+        if (dib) DeleteObject(dib);
+        DeleteDC(mem);
+        ReleaseDC(nullptr, screen);
+        return;
+    }
     HBITMAP oldBmp = (HBITMAP)SelectObject(mem, dib);
 
     {
@@ -1459,7 +1697,11 @@ void paint_art_popup_layered() {
         auto& st = strip_get_state();
         std::lock_guard<std::mutex> guard(st.lock);
         if (st.art) {
-            g.DrawImage(st.art, inset, inset, W - inset * 2, H - inset * 2);
+            // Letterboxed inside the border; for non-square covers the unused
+            // space is border too (same colour and opacity).
+            g.DrawImage(st.art, fit_image_rect(st.art->GetWidth(), st.art->GetHeight(),
+                        (float)inset, (float)inset,
+                        (float)(W - inset * 2), (float)(H - inset * 2)));
         } else {
             Color ph = theme().artPh;  // placeholder is opaque
             SolidBrush phb(Color(255, ph.GetR(), ph.GetG(), ph.GetB()));
@@ -1504,7 +1746,10 @@ void ensure_art_popup_created() {
     RegisterClassEx(&wc);
 
     g_artPopup = CreateWindowEx(
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED,
+        // WS_EX_TRANSPARENT: mouse passes through. If a big popup is clamped over
+        // the strip's own art, it would otherwise take the hover, hide itself,
+        // re-show, and flicker in a loop.
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
         kPopupClass, L"", WS_POPUP,
         0, 0, kPopupSize(), kPopupSize(),
         nullptr, nullptr, hInst, nullptr);
@@ -1522,8 +1767,14 @@ void show_art_popup() {
     int yAbove = sr.top - psize - 6;
     int yBelow = sr.bottom + 6;
 
-    // Clamp horizontally to the work area.
+    // Clamp to the work area of the monitor the STRIP is on (SPI_GETWORKAREA
+    // is the primary monitor only, which threw the popup onto the wrong screen).
     RECT wa{}; SystemParametersInfo(SPI_GETWORKAREA, 0, &wa, 0);
+    {
+        MONITORINFO mi{ sizeof(mi) };
+        if (GetMonitorInfo(MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST), &mi))
+            wa = mi.rcWork;
+    }
     if (x + psize > wa.right) x = wa.right - psize;
     if (x < wa.left) x = wa.left;
 
@@ -1548,20 +1799,28 @@ void hide_art_popup() {
 // System-wide move/size loop detection. EVENT_SYSTEM_MOVESIZESTART/END fire for
 // any window the user drags or resizes. While active, we pause strip repaints.
 // ----------------------------------------------------------------------------
-static void CALLBACK MoveSizeEventProc(HWINEVENTHOOK, DWORD event, HWND,
+static void CALLBACK MoveSizeEventProc(HWINEVENTHOOK, DWORD event, HWND evHwnd,
                                        LONG, LONG, DWORD, DWORD) {
     if (event == EVENT_SYSTEM_MOVESIZESTART) g_moveLoopActive = true;
     else if (event == EVENT_SYSTEM_MOVESIZEEND) {
         g_moveLoopActive = false;
-        if (g_hwnd) {
-            InvalidateRect(g_hwnd, nullptr, FALSE); // refresh once after
+        if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE); // refresh once after
+        // Only a drag of the STRIP re-docks it / saves its position. This hook
+        // is system-wide: before, dragging ANY window (foobar, a browser...)
+        // while the strip was auto-hidden reset the slide state and saved the
+        // off-screen spot, stranding it with auto-hide disengaged.
+        if (g_hwnd && evHwnd == g_hwnd) {
             RECT wr;
             if (GetWindowRect(g_hwnd, &wr)) {
                 // A fresh drag re-establishes the docked position. Reset the
                 // slide so we never persist (or stay at) an off-screen rect.
                 g_slideDir = 0; g_slideT = 0.0; g_autoHidden = false;
-                g_autoHideShownRect = wr;
-                strip_save_position(wr.left, wr.top);
+                RECT c = wr; clamp_rect_to_monitor(c);
+                if (c.left != wr.left || c.top != wr.top)
+                    SetWindowPos(g_hwnd, nullptr, c.left, c.top, 0, 0,
+                                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                g_autoHideShownRect = c;
+                strip_save_position(c.left, c.top);
             }
         }
     }
@@ -1575,6 +1834,7 @@ static void CALLBACK MoveSizeEventProc(HWINEVENTHOOK, DWORD event, HWND,
             bool fs = is_fullscreen_app_active();
             if (fs && !g_hiddenForFullscreen) {
                 g_hiddenForFullscreen = true;
+                if (g_artHover) { g_artHover = false; hide_art_popup(); }
                 ShowWindow(g_hwnd, SW_HIDE);
             } else if (!fs && g_hiddenForFullscreen) {
                 g_hiddenForFullscreen = false;
@@ -1632,7 +1892,10 @@ void strip_create_window() {
 
     // Tool window (off taskbar/alt-tab) + topmost + no activate (don't steal focus).
     DWORD exStyle = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED;
-    DWORD style = WS_POPUP | WS_VISIBLE;
+    // Honor the persisted master visibility up front: creating WS_VISIBLE and
+    // hiding afterwards flashed the strip on startup.
+    g_hiddenByUser = !strip_load_show_strip();
+    DWORD style = WS_POPUP | (g_hiddenByUser ? 0 : WS_VISIBLE);
 
     // Position: restore the last-dragged spot if we have one, else default to
     // the bottom-right of the work area.
@@ -1644,14 +1907,13 @@ void strip_create_window() {
         // taskbar, so clamping to it would yank an on-taskbar strip upward. We
         // still guard against fully off-screen (e.g. a detached monitor) by
         // keeping the window within the overall desktop bounds.
-        int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-        if (x < vx) x = vx;
-        if (y < vy) y = vy;
-        if (x > vx + vw - kWidth()) x = vx + vw - kWidth();
-        if (y > vy + vh - kHeight()) y = vy + vh - kHeight();
+        //
+        // Clamp into the NEAREST ACTUAL MONITOR rather than the bounding box of
+        // all monitors: with monitors of different sizes that box includes
+        // empty areas no screen covers, and the strip could start in one.
+        RECT r{ x, y, x + kWidth(), y + kHeight() };
+        clamp_rect_to_monitor(r);
+        x = r.left; y = r.top;
     } else {
         x = wa.right - kWidth() - 16;
         y = wa.bottom - kHeight() - 16;
@@ -1690,10 +1952,6 @@ void strip_create_window() {
         nullptr, MoveSizeEventProc, 0, 0,
         WINEVENT_OUTOFCONTEXT);
 
-    // Honor the persisted master visibility: if the user left it hidden, start
-    // hidden (the create style includes WS_VISIBLE, so we explicitly hide here).
-    g_hiddenByUser = !strip_load_show_strip();
-    if (g_hiddenByUser && g_hwnd) ShowWindow(g_hwnd, SW_HIDE);
 }
 
 // Apply the master "Show strip" setting: hide or show the whole window. Called
@@ -1712,11 +1970,17 @@ void strip_apply_visibility() {
     g_autoHidden = false; g_autoHideEdge = -1;
     g_slideDir = 0; g_slideT = 0.0;
     if (show) {
-        ShowWindow(g_hwnd, SW_SHOWNA);
-        SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        paint(g_hwnd);   // render immediately (layered)
+        paint(g_hwnd);   // render (layered) even if we stay hidden for fullscreen
+        // If a fullscreen app is up, stay hidden; the timer shows the strip
+        // when it ends. (Showing here left the strip frozen over the video.)
+        if (!g_hiddenForFullscreen) {
+            ShowWindow(g_hwnd, SW_SHOWNA);
+            SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
     } else {
+        g_artHover = false;
+        hide_art_popup();
         ShowWindow(g_hwnd, SW_HIDE);
     }
 }
@@ -1737,6 +2001,7 @@ void strip_destroy_window() {
     }
     UnregisterClass(kClassName, core_api::get_my_instance());
     invalidate_art_thumb();   // free cached thumbnail while GDI+ is still up
+    free_back_buffer();
     if (g_gdiplusToken) {
         GdiplusShutdown(g_gdiplusToken);
         g_gdiplusToken = 0;
@@ -1757,10 +2022,29 @@ void strip_apply_settings() {
     if (!g_hwnd) return;
     // kWidth()/kHeight() reflect the new configured dimensions automatically.
     // Resize the window to both, keeping its current top-left position.
+    // If auto-hidden, bring it back to its docked spot first so we resize the
+    // real (on-screen) rect, not the parked one.
+    if (g_autoHideEdge >= 0 && (g_autoHidden || g_slideT != 0.0)) {
+        g_slideT = 0.0;
+        auto_hide_apply_slide(g_hwnd);
+    }
+    g_autoHidden = false; g_slideDir = 0; g_slideT = 0.0;
+
     RECT wr;
     if (!GetWindowRect(g_hwnd, &wr)) return;
-    SetWindowPos(g_hwnd, nullptr, 0, 0, kWidth(), kHeight(),
-                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    // Keep the strip flush with a right/bottom screen edge it was docked to;
+    // growing it "from the top-left" pushed it off that edge (and broke the
+    // auto-hide dock).
+    int edge = strip_docked_edge(g_hwnd, S(2));
+    int nx = wr.left, ny = wr.top;
+    if (edge == 2) nx = wr.right  - kWidth();
+    if (edge == 3) ny = wr.bottom - kHeight();
+    g_inSlideMove = true;   // programmatic move: skip edge-snap
+    SetWindowPos(g_hwnd, nullptr, nx, ny, kWidth(), kHeight(),
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+    g_inSlideMove = false;
+    if (nx != wr.left || ny != wr.top) strip_save_position(nx, ny);
+    g_autoHideEdge = -1;    // timer re-establishes the dock from the new rect
     InvalidateRect(g_hwnd, nullptr, FALSE);
     if (g_artPopup && IsWindowVisible(g_artPopup))
         paint_art_popup_layered();  // live popup color/alpha update (layered)

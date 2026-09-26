@@ -58,6 +58,7 @@ bool strip_load_show_stop();            // show Stop button after Play
 void strip_save_show_stop(bool s);
 bool strip_load_show_strip();           // master strip visibility
 void strip_save_show_strip(bool s);
+unsigned strip_show_strip_serial();          // increments on every save
 void strip_apply_visibility();          // show/hide the strip per the setting
 int  strip_load_spacing(int which);     // 0 between buttons, 1 before volume
 void strip_save_spacing(int which, int s);

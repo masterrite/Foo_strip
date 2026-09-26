@@ -51,7 +51,9 @@ enum {
     ID_TABS = 1006,         // the Size/Color/Text tab control
     ID_EDIT_P = 1007, ID_SLIDER_P = 1008,   // popup size
     ID_FONT_FACE = 1009,                     // font family combobox
-    ID_EDIT_PA = 1015, ID_SLIDER_PA = 1016,  // popup alpha (transparency)
+    // (Popup alpha used to be 1015/1016, but 1015 is also ID_COLOR_BASE + 5,
+    // the popup-color swatch - so the edit box was unreachable by ID.)
+    ID_EDIT_PA = 1043, ID_SLIDER_PA = 1044,  // popup alpha (transparency)
     ID_EDIT_BA = 1017, ID_SLIDER_BA = 1018,  // strip background alpha
     ID_COLOR_BASE = 1010,   // color buttons: ID_COLOR_BASE + i (i = 0..5)
     ID_FEDIT_BASE = 1020,   // font size edits:   ID_FEDIT_BASE + k (k=0..2)
@@ -66,6 +68,10 @@ enum {
     ID_AUTO_HIDE = 1041,                      // auto-hide at screen edge checkbox
     ID_SHOW_STOP = 1042,                      // show Stop button checkbox
 };
+// Guard against ID collisions with the ranged IDs (colors, font edits/sliders).
+static_assert(ID_COLOR_BASE + 6 <= ID_EDIT_BA, "color IDs overlap");
+static_assert(ID_EDIT_PA > ID_SHOW_STOP && ID_SLIDER_PA > ID_SHOW_STOP, "popup alpha IDs overlap");
+
 enum { kNumColors = 6 };   // 0 bg,1 text,2 buttons,3 fill,4 track,5 popup padding
 enum { kNumFonts = 3 };    // 0 title, 1 artist, 2 time
 // Allowed ranges (must match the clamps in strip_load_*).
@@ -203,6 +209,7 @@ public:
             // ---- Visibility ----
             makeHeading(0, L"Visibility", LBL_X, y, CW); y += HEAD;
             m_savedShowStrip = m_origShowStrip = strip_load_show_strip();
+            m_liveSerial = strip_show_strip_serial();
             m_showStrip = CreateWindowExW(0, L"BUTTON", L"Show strip",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                 LBL_X, y, dscale(180), dscale(22), m_content, (HMENU)(INT_PTR)ID_SHOW_STRIP, inst, nullptr);
@@ -265,7 +272,7 @@ public:
 
             const wchar_t* colNames[kNumColors] = {
                 L"Background:", L"Text:", L"Buttons:", L"Bar fill:", L"Bar track:",
-                L"Popup padding:" };
+                L"Popup border:" };
             for (int i = 0; i < kNumColors; i++) {
                 track(0, makeLabel(colNames[i], LBL_X, lblY(y)));
                 m_colBtn[i] = CreateWindowExW(0, L"BUTTON", L"",
@@ -278,7 +285,7 @@ public:
             // ---- Transparency ----
             makeHeading(0, L"Transparency", LBL_X, y, CW); y += HEAD;
             m_savedPA = strip_load_popup_alpha(); m_origPA = m_savedPA;
-            track(0, makeLabel(L"Popup opacity:", LBL_X, lblY(y)));
+            track(0, makeLabel(L"Border opacity:", LBL_X, lblY(y)));
             m_sliderPA = makeSlider(ID_SLIDER_PA, CTL_X, y, PA_MIN, PA_MAX, m_savedPA); track(0, m_sliderPA);
             m_editPA   = makeEdit(ID_EDIT_PA, EDIT_X, y, m_savedPA, PA_MIN, PA_MAX); track(0, m_editPA); track(0, m_lastSpin);
             y += ROW;
@@ -399,7 +406,11 @@ public:
         if (strip_load_show_stop() != m_origShowStop) fontsChanged = true;
         if (strip_load_show_popup() != m_origShowPopup) fontsChanged = true;
         if (strip_load_auto_hide() != m_origAutoHide) fontsChanged = true;
-        bool stripVisChanged = (strip_load_show_strip() != m_origShowStrip);
+        // Only undo Show strip if nothing else has written it since THIS page
+        // did. If it was toggled from the View menu / a shortcut while the page
+        // was open, that newer choice wins and Cancel leaves it alone.
+        bool stripVisChanged = (strip_load_show_strip() != m_origShowStrip) &&
+                               (strip_show_strip_serial() == m_liveSerial);
         if (strip_load_spacing(0) != m_origSpace[0] || strip_load_spacing(1) != m_origSpace[1]) fontsChanged = true;
         if (strip_load_width()  != m_origW || strip_load_height() != m_origH ||
             strip_load_popup_size() != m_origP || strip_load_popup_alpha() != m_origPA ||
@@ -482,8 +493,16 @@ public:
         strip_save_show_popup(sp);
         strip_save_auto_hide(SendMessageW(m_autoHide, BM_GETCHECK, 0, 0) == BST_CHECKED);
         strip_save_show_stop(SendMessageW(m_showStop, BM_GETCHECK, 0, 0) == BST_CHECKED);
-        bool ss = SendMessageW(m_showStrip, BM_GETCHECK, 0, 0) == BST_CHECKED;
-        strip_save_show_strip(ss);
+        // Show strip: if it was changed from outside (View menu) since this page
+        // last wrote it, the checkbox is stale - adopt the current value
+        // instead of silently undoing the user's toggle.
+        if (strip_show_strip_serial() != m_liveSerial) {
+            SendMessageW(m_showStrip, BM_SETCHECK,
+                         strip_load_show_strip() ? BST_CHECKED : BST_UNCHECKED, 0);
+        } else {
+            bool ss = SendMessageW(m_showStrip, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            strip_save_show_strip(ss);
+        }
         strip_save_spacing(0, readEdit(ID_EDIT_SB));
         strip_save_spacing(1, readEdit(ID_EDIT_SV));
         strip_apply_settings();
@@ -511,6 +530,7 @@ public:
         m_savedAutoHide = m_origAutoHide = strip_load_auto_hide();
         m_savedShowStop = m_origShowStop = strip_load_show_stop();
         m_savedShowStrip = m_origShowStrip = strip_load_show_strip();
+        m_liveSerial = strip_show_strip_serial();
         m_savedSpace[0] = m_origSpace[0] = strip_load_spacing(0);
         m_savedSpace[1] = m_origSpace[1] = strip_load_spacing(1);
         setBoth(ID_SLIDER_SB, ID_EDIT_SB, m_savedSpace[0]);
@@ -555,8 +575,13 @@ public:
         setBoth(ID_SLIDER_IS, ID_EDIT_IS, 14);
         SendMessageW(m_showVol, BM_SETCHECK, BST_CHECKED, 0);   // default: shown
         SendMessageW(m_showStop, BM_SETCHECK, BST_UNCHECKED, 0); // default: no Stop button
+        SendMessageW(m_showPopup, BM_SETCHECK, BST_CHECKED, 0);  // default: popup on
+        SendMessageW(m_autoHide, BM_SETCHECK, BST_UNCHECKED, 0); // default: no auto-hide
+        strip_save_show_popup(true);     // these two are live-saved on click,
+        strip_save_auto_hide(false);     // so reset must save them live too
         SendMessageW(m_showStrip, BM_SETCHECK, BST_CHECKED, 0); // default: strip shown
         strip_save_show_strip(true);
+        m_liveSerial = strip_show_strip_serial();
         strip_apply_visibility();
         setBoth(ID_SLIDER_SB, ID_EDIT_SB, 0);                   // default: flush
         setBoth(ID_SLIDER_SV, ID_EDIT_SV, 4);                   // default: 4px gap
@@ -632,7 +657,7 @@ private:
             case SB_THUMBTRACK:
             case SB_THUMBPOSITION: {
                 SCROLLINFO si{ sizeof(si) }; si.fMask = SIF_TRACKPOS;
-                GetScrollInfo(m_hwnd, SB_VERT, &si);
+                GetScrollInfo(m_content, SB_VERT, &si);   // the bar lives on m_content
                 pos = si.nTrackPos; break;
             }
             case SB_TOP:    pos = 0; break;
@@ -774,10 +799,19 @@ private:
         out = utf8;
     }
 
+    // Read an edit box's number. If it's empty or not a number (mid-typing,
+    // cleared), fall back to its paired slider, which always holds the last
+    // valid value - instead of 0, which previewed alpha 0 (invisible strip)
+    // and let Apply commit a clamped minimum. Font-size edits pair with the
+    // slider 3 IDs up; every other edit's slider is the next ID.
     int readEdit(int id) {
         BOOL ok = FALSE;
         int v = (int)GetDlgItemInt(m_content, id, &ok, FALSE);
-        return ok ? v : 0;
+        if (ok) return v;
+        int sliderId = (id >= ID_FEDIT_BASE && id < ID_FEDIT_BASE + kNumFonts)
+                       ? id + (ID_FSLIDER_BASE - ID_FEDIT_BASE) : id + 1;
+        HWND sl = GetDlgItem(m_content, sliderId);
+        return sl ? (int)SendMessageW(sl, TBM_GETPOS, 0, 0) : 0;
     }
     // Set both the slider and edit for a value without re-triggering each other.
     void setBoth(int sliderId, int editId, int val) {
@@ -906,13 +940,17 @@ private:
         }
         // Scrolling works regardless of construction/sync state.
         if (msg == WM_SIZE) { configScrollbar(); return 0; }
-        if (msg == WM_VSCROLL) { onVScroll(LOWORD(wp)); return 0; }
+        // Only the panel's OWN scrollbar (lp == 0). Up-down spinners also send
+        // WM_VSCROLL to their parent, which made spinner clicks jump the panel.
+        if (msg == WM_VSCROLL && lp == 0) { onVScroll(LOWORD(wp)); return 0; }
         if (msg == WM_MOUSEWHEEL) {
             int delta = GET_WHEEL_DELTA_WPARAM(wp);
             int view = viewHeight();
             int content = (m_curTab >= 0 && m_curTab < 3) ? m_tabContentH[m_curTab] : 0;
             int maxPos = content - view; if (maxPos < 0) maxPos = 0;
-            int pos = m_scrollY - (delta / WHEEL_DELTA) * 48;
+            // Multiply before dividing: precision touchpads send deltas smaller
+            // than WHEEL_DELTA, which integer-divided to 0 and never scrolled.
+            int pos = m_scrollY - delta * 48 / WHEEL_DELTA;
             if (pos < 0) pos = 0; if (pos > maxPos) pos = maxPos;
             scrollTo(pos);
             return 0;
@@ -979,6 +1017,7 @@ private:
             else if (id == ID_SHOW_STRIP && code == BN_CLICKED) {
                 bool on = SendMessageW(m_showStrip, BM_GETCHECK, 0, 0) == BST_CHECKED;
                 strip_save_show_strip(on);
+                m_liveSerial = strip_show_strip_serial();
                 strip_apply_visibility();
                 changed();
             }
@@ -1028,7 +1067,20 @@ private:
         // COLORREF is 0x00BBGGRR - swap R and B from our 0xRRGGBB.
         cc.rgbResult = RGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
         cc.Flags = CC_FULLOPEN | CC_RGBINIT;
-        if (ChooseColorW(&cc)) {
+        // ChooseColorW runs a modal loop. The SDK warns the page can be closed
+        // and released while a modal dialog is up (e.g. foobar closed from the
+        // tray). Hold a reference so `this` survives the picker, and bail out if
+        // our window is gone when it returns. The reference must NOT be dropped
+        // here: we're still inside our own window procedure (and the dark-mode
+        // hook's), which touch members after we return. Hand it to a main-thread
+        // callback so the last release happens after this call stack unwinds.
+        service_ptr_t<strip_prefs_instance> self(this);
+        BOOL picked = ChooseColorW(&cc);
+        if (!IsWindow(m_hwnd) || !IsWindow(m_content)) {
+            fb2k::inMainThread([self] {});
+            return;
+        }
+        if (picked) {
             int r = GetRValue(cc.rgbResult), g = GetGValue(cc.rgbResult), b = GetBValue(cc.rgbResult);
             m_curCol[i] = (r << 16) | (g << 8) | b;
             InvalidateRect(m_colBtn[i], nullptr, TRUE);  // repaint swatch
@@ -1120,6 +1172,7 @@ private:
     bool m_savedAutoHide = false, m_origAutoHide = false;    // auto-hide at edge?
     bool m_savedShowStop = false, m_origShowStop = false;    // Stop button shown?
     bool m_savedShowStrip = true, m_origShowStrip = true;    // whole strip visible?
+    unsigned m_liveSerial = 0;     // Show-strip write count when THIS page last wrote it
     int m_savedSpace[2] = {0, 4}, m_origSpace[2] = {0, 4};   // btn gap / volume gap
     int m_savedMode = 1, m_origMode = 1;   // theme mode baseline / original
     int m_curCol[kNumColors] = {};         // working color values being edited

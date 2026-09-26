@@ -34,7 +34,7 @@ namespace {
 // ----------------------------------------------------------------------------
 DECLARE_COMPONENT_VERSION(
     "Floating Playback Strip",
-    "1.7.0",
+    "1.7.1",
     "A draggable floating strip with album art, title, transport, and a working "
     "seek bar. Reads playback directly in-process.\n");
 
@@ -64,7 +64,7 @@ void refresh_metadata() {
     if (tf_title.is_empty())
         titleformat_compiler::get()->compile_safe(tf_title, "%title%");
     if (tf_artist.is_empty())
-        titleformat_compiler::get()->compile_safe(tf_artist, "%artist%");
+        titleformat_compiler::get()->compile_safe(tf_artist, "[%artist%]");  // [] -> empty, not "?", when untagged
 
     pfc::string8 title8, artist8;
     pc->playback_format_title(nullptr, title8, tf_title, nullptr,
@@ -125,6 +125,179 @@ void refresh_from_core() {
 namespace {
 
 // ----------------------------------------------------------------------------
+// Album art.
+//
+// Normal track changes use foobar's shared now-playing art loader
+// (now_playing_album_art_notify_manager): the core reads the cover OFF the main
+// thread - including any slow network share or online-lookup fallback - and
+// hands us the bytes when ready, so a slow lookup never freezes foobar's UI.
+//
+// That loader is silent when a track has NO art, and it doesn't serve foobar's
+// stub image. So after a track change we wait briefly; if nothing has arrived
+// by then, we ask it for whatever it has and otherwise show the stub.
+//
+// Until the new cover arrives the previous one stays up (no blank flash).
+// Consecutive tracks with the same cover are detected by comparing the bytes,
+// so the image isn't re-decoded for every track of an album.
+// ----------------------------------------------------------------------------
+const UINT kArtWaitMs = 500;         // how long to wait before falling back to the stub
+bool              g_artQuitting = false;
+bool              g_artPending  = false;   // waiting for the loader after a track change
+UINT_PTR          g_artTimer    = 0;       // fallback timer (thread timer, no window)
+album_art_data_ptr g_artShownData;         // bytes of the image currently shown
+
+// Decode image bytes (JPEG/PNG/...) and cap the working copy at 1200px on the
+// longest side (large covers are expensive to hold and scale; 1200px is plenty
+// for the thumbnail and the popup). Only our in-memory copy - the user's file
+// is never touched. Returns null if GDI+ can't read the format (e.g. WebP) or
+// memory runs out.
+Gdiplus::Bitmap* art_decode(const album_art_data_ptr& d) {
+    if (!d.is_valid() || d->get_size() == 0) return nullptr;
+    IStream* stream = SHCreateMemStream(static_cast<const BYTE*>(d->get_ptr()),
+                                        static_cast<UINT>(d->get_size()));
+    if (!stream) return nullptr;
+    Gdiplus::Bitmap* bmp = Gdiplus::Bitmap::FromStream(stream);
+    stream->Release();
+    if (bmp && bmp->GetLastStatus() != Gdiplus::Ok) { delete bmp; bmp = nullptr; }
+    if (!bmp) return nullptr;
+
+    const UINT kMaxDim = 1200;
+    UINT ow = bmp->GetWidth(), oh = bmp->GetHeight();
+    if (ow > kMaxDim || oh > kMaxDim) {
+        double sc = (double)kMaxDim / (ow > oh ? ow : oh);
+        int nw = (int)(ow * sc + 0.5), nh = (int)(oh * sc + 0.5);
+        if (nw < 1) nw = 1;
+        if (nh < 1) nh = 1;
+        // GDI+'s operator new returns nullptr (doesn't throw) when out of memory.
+        auto* small_ = new Gdiplus::Bitmap(nw, nh, PixelFormat32bppPARGB);
+        if (small_ && small_->GetLastStatus() == Gdiplus::Ok) {
+            Gdiplus::Graphics gs(small_);
+            gs.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+            gs.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+            gs.DrawImage(bmp, 0, 0, nw, nh);
+            delete bmp;
+            bmp = small_;
+        } else {
+            delete small_;          // couldn't allocate - keep the original
+        }
+    }
+    return bmp;
+}
+
+// foobar's configured stub image (Display > Album Art > Stub image).
+album_art_data_ptr art_query_stub() {
+    try {
+        abort_callback_dummy abort;
+        auto ex = album_art_manager_v2::get()->open_stub(abort);
+        if (ex.is_valid()) return ex->query(album_art_ids::cover_front, abort);
+    } catch (...) {}
+    return album_art_data_ptr();
+}
+
+// Read the playing track's front cover directly (blocking). Used only after the
+// user edits the playing track's tags/art - rare, and the shared loader may not
+// re-read the file for an edit.
+album_art_data_ptr art_query_now_playing_sync() {
+    try {
+        metadb_handle_ptr track;
+        if (!playback_control::get()->get_now_playing(track) || track.is_empty())
+            return album_art_data_ptr();
+        metadb_handle_list items; items.add_item(track);
+        pfc::list_t<GUID> ids;    ids.add_item(album_art_ids::cover_front);
+        abort_callback_dummy abort;
+        auto ex = album_art_manager_v2::get()->open(items, ids, abort);
+        return ex->query(album_art_ids::cover_front, abort);
+    } catch (...) {}   // not found / unreadable -> stub
+    return album_art_data_ptr();
+}
+
+// Swap a new bitmap (may be null) into the shared state.
+void art_set(Gdiplus::Bitmap* bmp, const album_art_data_ptr& src) {
+    {
+        std::lock_guard<std::mutex> guard(g_state.lock);
+        delete g_state.art;
+        g_state.art = bmp;
+        g_state.artGen++;   // invalidates the strip's cached thumbnail
+    }
+    g_artShownData = src;
+    strip_notify_repaint();
+}
+
+bool art_already_shown(const album_art_data_ptr& d) {
+    if (!d.is_valid() || !g_artShownData.is_valid()) return false;
+    bool haveBmp;
+    { std::lock_guard<std::mutex> g(g_state.lock); haveBmp = (g_state.art != nullptr); }
+    return haveBmp && album_art_data::equals(d, g_artShownData);
+}
+
+// Show these bytes; if they're missing or undecodable, show the stub instead.
+void art_show(const album_art_data_ptr& d) {
+    if (art_already_shown(d)) return;
+    Gdiplus::Bitmap* bmp = art_decode(d);
+    if (bmp) { art_set(bmp, d); return; }
+    album_art_data_ptr stub = art_query_stub();
+    if (art_already_shown(stub)) return;
+    art_set(art_decode(stub), stub);   // null if no stub -> placeholder
+}
+
+void art_cancel_wait() {
+    g_artPending = false;
+    if (g_artTimer) { KillTimer(nullptr, g_artTimer); g_artTimer = 0; }
+}
+
+// Nothing arrived in time: use whatever the loader has, else the stub.
+void CALLBACK art_wait_expired(HWND, UINT, UINT_PTR, DWORD) {
+    bool wasPending = g_artPending;
+    art_cancel_wait();
+    if (g_artQuitting || !wasPending) return;
+    if (!playback_control::get()->is_playing()) return;
+    album_art_data_ptr cur;
+    try { cur = now_playing_album_art_notify_manager::get()->current(); } catch (...) {}
+    art_show(cur);
+}
+
+// A new track started (or the strip started mid-playback): wait for the loader.
+void art_on_new_track() {
+    art_cancel_wait();
+    g_artPending = true;
+    g_artTimer = SetTimer(nullptr, 0, kArtWaitMs, art_wait_expired);
+    if (!g_artTimer) art_wait_expired(nullptr, 0, 0, 0);   // no timer: decide now
+}
+
+void art_clear() {
+    art_cancel_wait();
+    art_set(nullptr, album_art_data_ptr());
+}
+
+// Receives covers from foobar's shared loader.
+class strip_art_notify : public now_playing_album_art_notify {
+public:
+    void on_album_art(album_art_data::ptr data) override {
+        // The SDK doesn't promise which thread this arrives on; everything we
+        // touch here belongs to the main thread, so hop over if needed.
+        if (!core_api::is_main_thread()) {
+            fb2k::inMainThread([this, data] { on_album_art(data); });
+            return;
+        }
+        if (g_artQuitting) return;
+        if (!playback_control::get()->is_playing()) return;   // arrived after stop
+        // Only accept it if it's the loader's CURRENT cover. A late delivery
+        // for the previous track (fast skipping, or queued by the thread hop
+        // above) would otherwise show the wrong cover and cancel the fallback.
+        album_art_data_ptr cur;
+        try { cur = now_playing_album_art_notify_manager::get()->current(); } catch (...) {}
+        if (cur.is_empty() || !album_art_data::equals(cur, data)) return;
+        art_cancel_wait();
+        art_show(data);
+    }
+};
+strip_art_notify g_artNotify;
+
+} // namespace
+
+namespace {
+
+// ----------------------------------------------------------------------------
 // play_callback_static - playback events, always on the main thread.
 // ----------------------------------------------------------------------------
 class strip_play_callback : public play_callback_static {
@@ -134,6 +307,7 @@ public:
         return flag_on_playback_new_track | flag_on_playback_stop |
                flag_on_playback_pause | flag_on_playback_seek |
                flag_on_playback_time | flag_on_playback_dynamic_info_track |
+               flag_on_playback_edited |
                flag_on_volume_change;
     }
 
@@ -155,16 +329,26 @@ public:
         // anchor stick on skip).
         strip_reset_interp();
 
-        load_album_art();
-        // Sync the dynamic-info art key so a fresh track (file or stream start)
-        // is always considered "changed" and the next dynamic-info compares
-        // against this track, not the previous one.
-        { std::lock_guard<std::mutex> g(g_state.lock);
-          m_lastArtKey = g_state.title + L"\x1f" + g_state.artist; }
+        art_on_new_track();   // cover arrives from foobar's loader (or the stub)
         strip_notify_repaint();
     }
 
-    void on_playback_stop(play_control::t_stop_reason) override {
+    void on_playback_stop(play_control::t_stop_reason reason) override {
+        // A track change fires stop(starting_another) immediately before
+        // new_track. Clearing here made the strip flash "Nothing playing" and
+        // the placeholder art for a frame on every skip, so leave the old
+        // title/art up and let on_playback_new_track replace them.
+        //
+        // Still mark playback as not running, though: if the next track then
+        // fails to open, the clock must not keep counting. new_track's
+        // refresh_from_core() sets both straight back when it does start.
+        if (reason == play_control::stop_reason_starting_another) {
+            std::lock_guard<std::mutex> guard(g_state.lock);
+            g_state.playing = false;
+            g_state.canSeek = false;
+            return;
+        }
+        strip_reset_interp();   // drop any pending-seek hold from the old track
         {
             std::lock_guard<std::mutex> guard(g_state.lock);
             g_state.title = L"Nothing playing";
@@ -172,11 +356,8 @@ public:
             g_state.position = g_state.length = 0.0;
             g_state.playing = false;
             g_state.canSeek = false;
-            delete g_state.art;
-            g_state.art = nullptr;
-            g_state.artGen++;
         }
-        strip_notify_repaint();
+        art_clear();            // also repaints
     }
 
     void on_playback_pause(bool) override {
@@ -189,7 +370,12 @@ public:
             std::lock_guard<std::mutex> guard(g_state.lock);
             g_state.position = t;
         }
-        strip_reset_interp();  // re-anchor interpolation to the seeked position
+        // Re-anchor interpolation AT the seeked position. (Resetting alone left
+        // the interpolated position at 0 until the next timer tick, so every
+        // seek flashed 0:00 for a frame.) reset clears the pending-seek hold,
+        // sync then sets the position and baseline to t.
+        strip_reset_interp();
+        strip_sync_interp(t);
         strip_notify_repaint();
     }
 
@@ -206,140 +392,30 @@ public:
         strip_notify_repaint();
     }
 
+    // Radio streams: the song title changes mid-stream. Only the text needs
+    // refreshing - the cover for a stream comes from foobar's loader like any
+    // other track, and a stream without art keeps showing the stub.
     void on_playback_dynamic_info_track(const file_info&) override {
         refresh_metadata();
-        // Radio streams don't fire on_playback_new_track per song - the station
-        // stays "playing" while song metadata arrives via dynamic info. Re-fetch
-        // album art here too so per-song art (or the stub) updates for streams.
-        //
-        // BUT dynamic-info fires often - on every metadata update, buffering blip,
-        // or keepalive, frequently with IDENTICAL title/artist. Re-decoding the art
-        // each time was pure wasted CPU (the reported spikes). So only re-fetch when
-        // the track identity actually changed since the last art load.
-        std::wstring key;
-        { std::lock_guard<std::mutex> g(g_state.lock);
-          key = g_state.title + L"\x1f" + g_state.artist; }
-        if (key != m_lastArtKey) {
-            m_lastArtKey = key;
-            load_album_art();
-        }
         strip_notify_repaint();
     }
 
     // Unused events (must be present).
     void on_playback_starting(play_control::t_track_command, bool) override {}
-    void on_playback_edited(metadb_handle_ptr) override {}
+    // Tags or embedded art of the PLAYING track were edited (Properties,
+    // Masstagger...): re-read them so the strip doesn't show stale text/art.
+    void on_playback_edited(metadb_handle_ptr) override {
+        refresh_metadata();
+        art_cancel_wait();
+        art_show(art_query_now_playing_sync());   // repaints if the art changed
+        strip_notify_repaint();
+    }
     void on_playback_dynamic_info(const file_info&) override {}
     void on_volume_change(float) override {
         refresh_from_core();
         strip_notify_repaint();
     }
-
-private:
-    // Pull album art for the current track and hand a GDI+ bitmap to the state.
-    void load_album_art();
-
-    // Track identity (title\x1f artist) at the last art fetch, so radio dynamic-
-    // info updates only re-decode art when the song actually changes.
-    std::wstring m_lastArtKey;
 };
-
-// Album art extraction via album_art_manager_v2. Falls back to foobar's
-// configured stub image when a track has no embedded/folder cover.
-void strip_play_callback::load_album_art() {
-    Gdiplus::Bitmap* newBmp = nullptr;
-    try {
-        auto pc = playback_control::get();
-        metadb_handle_ptr track;
-        if (!pc->get_now_playing(track) || track.is_empty()) return;
-
-        // Build the single-item handle list and single-id list the API expects.
-        metadb_handle_list items;
-        items.add_item(track);
-
-        pfc::list_t<GUID> ids;
-        ids.add_item(album_art_ids::cover_front);
-
-        auto aamv2 = album_art_manager_v2::get();
-        abort_callback_dummy abort;
-
-        // Query the real cover art. open()/query() THROW when there's no art
-        // (foobar signals "not found" via exception, not an empty result), so
-        // this needs its own try/catch - otherwise a "no art" throw unwinds past
-        // the stub fallback below to the outer catch and the strip shows nothing.
-        album_art_data_ptr data;
-        bool gotReal = false;
-        try {
-            auto extractor = aamv2->open(items, ids, abort);
-            data = extractor->query(album_art_ids::cover_front, abort);
-            gotReal = (data.is_valid() && data->get_size() > 0);
-        } catch (exception_album_art_not_found const &) {
-            // No embedded/folder art - fall through to the stub below.
-        } catch (std::exception const &) {
-            // Any other extraction error - also fall through to the stub.
-        }
-
-        // Radio streams and untagged files often have no cover. Fall back to
-        // foobar's configured stub image (Display > Album Art > Stub image), which
-        // is served by a SEPARATE extractor obtained via open_stub().
-        if (!gotReal) {
-            try {
-                auto stubEx = aamv2->open_stub(abort);
-                if (stubEx.is_valid())
-                    data = stubEx->query(album_art_ids::cover_front, abort);
-            } catch (...) { /* no stub configured -> leave blank, handled below */ }
-        }
-
-        if (data.is_valid() && data->get_size() > 0) {
-            // Wrap raw bytes (JPEG/PNG) in an IStream for GDI+.
-            IStream* stream = SHCreateMemStream(
-                static_cast<const BYTE*>(data->get_ptr()),
-                static_cast<UINT>(data->get_size()));
-            if (stream) {
-                newBmp = Gdiplus::Bitmap::FromStream(stream);
-                stream->Release();
-                if (newBmp && newBmp->GetLastStatus() != Gdiplus::Ok) {
-                    delete newBmp;
-                    newBmp = nullptr;
-                }
-
-                // Cap the working copy at 1200px on the longest side. Large covers
-                // (e.g. 4000x4000) are expensive to hold and scale; a 1200px copy
-                // is plenty for the strip thumbnail and the hover popup. This only
-                // touches our IN-MEMORY bitmap - the user's file is never modified.
-                // Art already <=1200 on both sides is left exactly as-is.
-                const UINT kMaxDim = 1200;
-                if (newBmp) {
-                    UINT ow = newBmp->GetWidth(), oh = newBmp->GetHeight();
-                    if (ow > kMaxDim || oh > kMaxDim) {
-                        double s = (double)kMaxDim / (ow > oh ? ow : oh);
-                        int nw = (int)(ow * s + 0.5), nh = (int)(oh * s + 0.5);
-                        if (nw < 1) nw = 1;
-                        if (nh < 1) nh = 1;
-                        auto* smallBmp = new Gdiplus::Bitmap(nw, nh, PixelFormat32bppPARGB);
-                        if (smallBmp->GetLastStatus() == Gdiplus::Ok) {
-                            Gdiplus::Graphics gs(smallBmp);
-                            gs.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-                            gs.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-                            gs.DrawImage(newBmp, 0, 0, nw, nh);
-                            delete newBmp;      // free the oversized in-memory copy
-                            newBmp = smallBmp;     // keep the downsized working copy
-                        } else {
-                            delete smallBmp;       // couldn't allocate - keep original
-                        }
-                    }
-                }
-            }
-        }
-    } catch (...) {
-        // No art / extraction failed - leave null, window draws a placeholder.
-    }
-
-    std::lock_guard<std::mutex> guard(g_state.lock);
-    delete g_state.art;
-    g_state.art = newBmp;
-    g_state.artGen++;   // invalidates the strip's cached thumbnail
-}
 
 static play_callback_static_factory_t<strip_play_callback> g_play_cb_factory;
 
@@ -355,19 +431,37 @@ public:
     void on_init() override {
         strip_anchor_factories();
         strip_create_window();
-        // Prime initial state in case playback is already running.
+        g_artQuitting = false;
+        try { now_playing_album_art_notify_manager::get()->add(&g_artNotify); } catch (...) {}
+        // Prime initial state in case playback is already running (including
+        // its album art, which previously stayed empty until the next track).
         if (playback_control::get()->is_playing()) {
             refresh_metadata();
             refresh_from_core();
+            album_art_data_ptr cur;
+            try { cur = now_playing_album_art_notify_manager::get()->current(); } catch (...) {}
+            if (cur.is_valid()) art_show(cur);
+            else art_on_new_track();   // still loading, or no art -> stub
             strip_notify_repaint();
         }
     }
     void on_quit() override {
+        // Stop receiving covers first, so nothing can arrive (or be queued to
+        // the main thread and run) after GDI+ is shut down.
+        g_artQuitting = true;
+        try { now_playing_album_art_notify_manager::get()->remove(&g_artNotify); } catch (...) {}
+        art_cancel_wait();
+        g_artShownData.release();
+        // Free the cached Bitmap BEFORE strip_destroy_window(), which calls
+        // GdiplusShutdown. Deleting a GDI+ object after shutdown is undefined
+        // behaviour and can crash on exit.
+        {
+            std::lock_guard<std::mutex> guard(g_state.lock);
+            delete g_state.art;
+            g_state.art = nullptr;
+            g_state.artGen++;
+        }
         strip_destroy_window();
-        std::lock_guard<std::mutex> guard(g_state.lock);
-        delete g_state.art;
-        g_state.art = nullptr;
-        g_state.artGen++;
     }
 };
 
@@ -587,8 +681,12 @@ void strip_save_show_stop(bool s)    { g_cfg_show_stop = s; }
 static cfg_bool g_cfg_show_strip(
     GUID{ 0x9a3f1c34, 0x4b7e, 0x4e8a, { 0x9c, 0x12, 0x7f, 0x3a, 0x6e, 0x5d, 0x21, 0x58 } }, true);
 
+// Bumped on every write, so the prefs page can tell whether Show strip was
+// changed by someone else (View menu / shortcut) since the page last wrote it.
+static unsigned g_show_strip_serial = 0;
 bool strip_load_show_strip()        { return g_cfg_show_strip; }
-void strip_save_show_strip(bool s)  { g_cfg_show_strip = s; }
+void strip_save_show_strip(bool s)  { g_cfg_show_strip = s; ++g_show_strip_serial; }
+unsigned strip_show_strip_serial()  { return g_show_strip_serial; }
 
 // Control spacing (px at default width; scaled by width). Index 0 = gap between
 // transport buttons (default 0, i.e. flush), 1 = gap between the button group

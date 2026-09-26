@@ -90,8 +90,7 @@
       <!-- Treat all source files as UTF-8 regardless of the system code page, so
            non-ASCII characters in comments never trigger C4819 or get corrupted. -->
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <!-- SDK uses the dynamic CRT; component must match (/MD, /MDd). Using the
-           DLL CRT also keeps the binary small - the runtime isn't linked in. -->
+      <!-- SDK uses static CRT; component must match (/MT, /MTd). -->
       <PreprocessorDefinitions>WIN32;_WINDOWS;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
@@ -124,22 +123,10 @@
 
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
     <ClCompile>
-      <!-- Optimize for SIZE, not speed. This is a small UI component with no hot
-           loops, so /O1 (MinSpace) + favor-size trades nothing meaningful for a
-           noticeably smaller DLL vs. /O2 (MaxSpeed). -->
-      <Optimization>MinSpace</Optimization>
-      <FavorSizeOrSpeed>Size</FavorSizeOrSpeed>
-      <!-- NDEBUG strips assertions (assert / PFC_ASSERT) and debug-only branches
-           from the release binary - smaller code, and silences the SDK's
-           "release build without NDEBUG" warning. -->
-      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <Optimization>MaxSpeed</Optimization>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <!-- No C++ RTTI: the code uses no dynamic_cast/typeid (foobar's service
-           system has its own RTTI-free query mechanism), so /GR- drops the RTTI
-           type tables. /EHsc (C++ exceptions) is kept - the SDK requires it. -->
-      <RuntimeTypeInfo>false</RuntimeTypeInfo>
     </ClCompile>
     <Link>
       <!-- Optimizations re-enabled. The service factories that foobar discovers
@@ -149,7 +136,6 @@
       <OptimizeReferences>true</OptimizeReferences>
     </Link>
   </ItemDefinitionGroup>
-
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
     <ClCompile>
       <Optimization>Disabled</Optimization>
